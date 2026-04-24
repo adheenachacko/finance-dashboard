@@ -235,37 +235,89 @@ async def analyze(
         return {"error": "Could not extract text from this PDF."}
 
     transaction_data = categorize_transactions(text)
-    transactions = transaction_data["transactions"]
-    result = generate_insights(transactions)
-    result["transactions"] = transactions
+    new_transactions = transaction_data["transactions"]
+    
 
-    if not month and transactions:
-        first_date = transactions[0]["date"]
+    # Detect month from transactions if not provided
+    if not month and new_transactions:
+        first_date = new_transactions[0]["date"]
         month = first_date[:7]
 
-    statement = Statement(
-        person_id=person_id,
-        person_name=person_name,
-        month=month,
-        transactions=transactions,
-        totals={
+    # Check if a statement already exists for this person and month
+    existing = db.query(Statement).filter(
+        Statement.person_id == person_id,
+        Statement.month == month
+    ).first()
+
+    if existing:
+        # Merge transactions — combine existing and new, deduplicate by date+description+amount
+        existing_transactions = existing.transactions or []
+        all_transactions = existing_transactions + new_transactions
+
+        # Deduplicate
+        seen = set()
+        merged_transactions = []
+        for t in all_transactions:
+            key = f"{t['date']}_{t['description']}_{t['amount']}"
+            if key not in seen:
+                seen.add(key)
+                merged_transactions.append(t)
+
+        # Recalculate totals and insights with merged transactions
+        result = generate_insights(merged_transactions)
+        result["transactions"] = merged_transactions
+
+        # Update existing record
+        existing.transactions = merged_transactions
+        existing.totals = {
             "income": result["income"],
             "spending": result["spending"],
             "savings": result["savings"],
             "savings_rate": result["savings_rate"],
             "categories": result["categories"]
-        },
-        insights=result["insights"]
-    )
-    db.add(statement)
-    db.commit()
-    db.refresh(statement)
+        }
+        existing.insights = result["insights"]
+        db.commit()
+        db.refresh(existing)
 
-    result["id"] = statement.id
-    result["month"] = month
-    result["person_name"] = person_name
+        result["id"] = existing.id
+        result["month"] = month
+        result["person_name"] = person_name
+        result["merged"] = True
+        result["transaction_count"] = len(merged_transactions)
 
-    return result
+        return result
+
+    else:
+        # No existing statement — create new one
+        result = generate_insights(new_transactions)
+        result["transactions"] = new_transactions
+
+        statement = Statement(
+            person_id=person_id,
+            person_name=person_name,
+            month=month,
+            transactions=new_transactions,
+            totals={
+                "income": result["income"],
+                "spending": result["spending"],
+                "savings": result["savings"],
+                "savings_rate": result["savings_rate"],
+                "categories": result["categories"]
+            },
+            insights=result["insights"]
+        )
+        db.add(statement)
+        db.commit()
+        db.refresh(statement)
+
+        result["id"] = statement.id
+        result["month"] = month
+        result["person_name"] = person_name
+        result["merged"] = False
+        result["transaction_count"] = len(new_transactions)
+
+        return result
 
 
 @app.get("/statements")

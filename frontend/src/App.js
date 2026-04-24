@@ -438,9 +438,16 @@ export default function App() {
         {result && (
           <>
             {result.person_name && result.month && (
-              <p style={styles.resultLabel}>
-                {result.person_name} — {result.month}
-              </p>
+              <div style={styles.resultLabelRow}>
+                <p style={styles.resultLabel}>
+                  {result.person_name} — {formatMonth(result.month)}
+                </p>
+                {result.merged && (
+                  <p style={styles.mergedBadge}>
+                    Merged with existing — {result.transaction_count} total transactions
+                  </p>
+                )}
+              </div>
             )}
 
             <div style={styles.totalsRow}>
@@ -894,5 +901,20 @@ const styles = {
     borderRadius: 12,
     fontSize: 12,
     fontWeight: "bold",
+  },
+  resultLabelRow: {
+    marginBottom: 16,
+  },
+  mergedBadge: {
+    fontSize: 13,
+    color: "#2ecc71",
+    margin: "4px 0 0 0",
+  },
+  input: {
+    padding: "8px 12px",
+    borderRadius: 6,
+    border: "1px solid #ddd",
+    fontSize: 14,
+    width: 180,
   },
 };
