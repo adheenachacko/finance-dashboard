@@ -15,7 +15,114 @@ const CATEGORY_COLORS = {
   Other: "#95a5a6",
 };
 
+function formatMonth(monthStr) {
+  if (!monthStr) return "";
+  const [year, month] = monthStr.split("-");
+  const date = new Date(year, parseInt(month) - 1);
+  return date.toLocaleString("default", { month: "long", year: "numeric" });
+}
+
+const API = "http://localhost:8000";
+
+function getToken() {
+  return localStorage.getItem("token");
+}
+
+function authHeaders() {
+  return { Authorization: `Bearer ${getToken()}` };
+}
+
+// ── Auth Screen ───────────────────────────────────────
+
+function AuthScreen({ onLogin }) {
+  const [isLogin, setIsLogin] = useState(true);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async () => {
+    setLoading(true);
+    setError(null);
+    const formData = new FormData();
+    formData.append("email", email);
+    formData.append("password", password);
+
+    try {
+      const response = await fetch(`${API}/${isLogin ? "login" : "signup"}`, {
+        method: "POST",
+        body: formData,
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setError(data.detail || "Something went wrong");
+      } else {
+        localStorage.setItem("token", data.access_token);
+        onLogin(data.email);
+      }
+    } catch {
+      setError("Could not connect to server");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={styles.authPage}>
+      <div style={styles.authCard}>
+        <h1 style={styles.authTitle}>Finance Dashboard</h1>
+        <p style={styles.authSubtitle}>
+          {isLogin ? "Sign in to your account" : "Create your account"}
+        </p>
+
+        <label style={styles.label}>Email</label>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          style={styles.authInput}
+          placeholder="you@email.com"
+        />
+
+        <label style={styles.label}>Password</label>
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          style={styles.authInput}
+          placeholder="••••••••"
+          onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+        />
+
+        {error && <p style={styles.error}>{error}</p>}
+
+        <button
+          onClick={handleSubmit}
+          disabled={loading}
+          style={loading ? styles.buttonDisabled : styles.button}
+        >
+          {loading ? "Please wait..." : isLogin ? "Sign In" : "Sign Up"}
+        </button>
+
+        <p style={styles.authSwitch}>
+          {isLogin ? "Don't have an account?" : "Already have an account?"}{" "}
+          <span
+            onClick={() => { setIsLogin(!isLogin); setError(null); }}
+            style={styles.authLink}
+          >
+            {isLogin ? "Sign up" : "Sign in"}
+          </span>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────
+
 export default function App() {
+  const [user, setUser] = useState(null);
+  const [checkingAuth, setCheckingAuth] = useState(true);
   const [file, setFile] = useState(null);
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -27,18 +134,33 @@ export default function App() {
   const [showAddPerson, setShowAddPerson] = useState(false);
 
   useEffect(() => {
-    fetchPeople();
-    fetchStatements();
+    const token = getToken();
+    if (token) {
+      fetch(`${API}/me`, { headers: authHeaders() })
+        .then(r => r.json())
+        .then(data => {
+          if (data.email) setUser(data.email);
+        })
+        .catch(() => { })
+        .finally(() => setCheckingAuth(false));
+    } else {
+      setCheckingAuth(false);
+    }
   }, []);
+
+  useEffect(() => {
+    if (user) {
+      fetchPeople();
+      fetchStatements();
+    }
+  }, [user]);
 
   const fetchPeople = async () => {
     try {
-      const response = await fetch("http://localhost:8000/people");
+      const response = await fetch(`${API}/people`, { headers: authHeaders() });
       const data = await response.json();
       setPeople(data);
-      if (data.length > 0 && !selectedPersonId) {
-        setSelectedPersonId(data[0].id);
-      }
+      if (data.length > 0) setSelectedPersonId(data[0].id);
     } catch {
       console.log("Could not fetch people");
     }
@@ -46,7 +168,7 @@ export default function App() {
 
   const fetchStatements = async () => {
     try {
-      const response = await fetch("http://localhost:8000/statements");
+      const response = await fetch(`${API}/statements`, { headers: authHeaders() });
       const data = await response.json();
       setStatements(data);
     } catch {
@@ -56,11 +178,14 @@ export default function App() {
 
   const addPerson = async () => {
     if (!newPersonName.trim()) return;
+    const formData = new FormData();
+    formData.append("name", newPersonName);
     try {
-      const response = await fetch(
-        `http://localhost:8000/people?name=${encodeURIComponent(newPersonName)}`,
-        { method: "POST" }
-      );
+      const response = await fetch(`${API}/people`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: formData,
+      });
       const data = await response.json();
       setNewPersonName("");
       setShowAddPerson(false);
@@ -75,7 +200,10 @@ export default function App() {
     e.stopPropagation();
     if (!window.confirm("Delete this person and all their statements?")) return;
     try {
-      await fetch(`http://localhost:8000/people/${id}`, { method: "DELETE" });
+      await fetch(`${API}/people/${id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
       fetchPeople();
       fetchStatements();
       setResult(null);
@@ -97,8 +225,9 @@ export default function App() {
     formData.append("person_id", selectedPersonId);
 
     try {
-      const response = await fetch("http://localhost:8000/analyze", {
+      const response = await fetch(`${API}/analyze`, {
         method: "POST",
+        headers: authHeaders(),
         body: formData,
       });
       const text = await response.text();
@@ -118,7 +247,9 @@ export default function App() {
 
   const loadStatement = async (id) => {
     try {
-      const response = await fetch(`http://localhost:8000/statements/${id}`);
+      const response = await fetch(`${API}/statements/${id}`, {
+        headers: authHeaders(),
+      });
       const data = await response.json();
       setResult({
         ...data.totals,
@@ -137,7 +268,10 @@ export default function App() {
     e.stopPropagation();
     if (!window.confirm("Delete this statement?")) return;
     try {
-      await fetch(`http://localhost:8000/statements/${id}`, { method: "DELETE" });
+      await fetch(`${API}/statements/${id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
       fetchStatements();
       if (result?.id === id) setResult(null);
     } catch {
@@ -145,20 +279,30 @@ export default function App() {
     }
   };
 
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    setUser(null);
+    setPeople([]);
+    setStatements([]);
+    setResult(null);
+  };
+
   const chartData = result
     ? Object.entries(result.categories || {}).map(([name, value]) => ({
-        name,
-        amount: value,
-      }))
+      name,
+      amount: value,
+    }))
     : [];
 
-  // Group statements by person
   const statementsByPerson = people.map(person => ({
-  ...person,
-  statements: statements.filter(s => 
-    s.person_name === person.name || s.person_id === person.id
-  )
-}));
+    ...person,
+    statements: statements.filter(s =>
+      s.person_id === person.id || s.person_name === person.name
+    )
+  }));
+
+  if (checkingAuth) return <div style={styles.loading}>Loading...</div>;
+  if (!user) return <AuthScreen onLogin={setUser} />;
 
   return (
     <div style={styles.page}>
@@ -214,7 +358,7 @@ export default function App() {
                 style={styles.sidebarItem}
               >
                 <div style={styles.sidebarTop}>
-                  <p style={styles.sidebarMonth}>{s.month}</p>
+                  <p style={styles.sidebarMonth}>{formatMonth(s.month)}</p>
                   <button
                     onClick={(e) => deleteStatement(s.id, e)}
                     style={styles.deleteButton}
@@ -223,19 +367,29 @@ export default function App() {
                   </button>
                 </div>
                 <p style={styles.sidebarAmount}>
-                  Saved ${s.totals?.savings?.toLocaleString() || 0}
+                  {s.totals?.savings > 0
+                    ? `Saved $${s.totals.savings.toLocaleString()}`
+                    : `Spent $${s.totals?.spending?.toLocaleString() || 0}`}
                 </p>
+
               </div>
             ))}
           </div>
         ))}
+
+        {/* Logout */}
+        <div style={styles.logoutSection}>
+          <p style={styles.userEmail}>{user}</p>
+          <button onClick={handleLogout} style={styles.logoutButton}>
+            Sign out
+          </button>
+        </div>
       </div>
 
       {/* Main content */}
       <div style={styles.main}>
         <h1 style={styles.title}>Finance Dashboard</h1>
 
-        {/* Upload Section */}
         <div style={styles.card}>
           <h2 style={styles.cardTitle}>Upload Statement</h2>
 
@@ -281,7 +435,6 @@ export default function App() {
           {error && <p style={styles.error}>{error}</p>}
         </div>
 
-        {/* Results */}
         {result && (
           <>
             {result.person_name && result.month && (
@@ -404,6 +557,62 @@ export default function App() {
 }
 
 const styles = {
+  loading: {
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+    height: "100vh",
+    fontFamily: "Arial, sans-serif",
+    color: "#888",
+  },
+  authPage: {
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+    minHeight: "100vh",
+    background: "#f5f7fa",
+    fontFamily: "Arial, sans-serif",
+  },
+  authCard: {
+    background: "white",
+    borderRadius: 16,
+    padding: 40,
+    width: 380,
+    boxShadow: "0 4px 24px rgba(0,0,0,0.1)",
+  },
+  authTitle: {
+    fontSize: 28,
+    fontWeight: "bold",
+    color: "#1a1a2e",
+    marginBottom: 8,
+    textAlign: "center",
+  },
+  authSubtitle: {
+    color: "#888",
+    textAlign: "center",
+    marginBottom: 24,
+    fontSize: 14,
+  },
+  authInput: {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 8,
+    border: "1px solid #ddd",
+    fontSize: 14,
+    marginBottom: 16,
+    boxSizing: "border-box",
+  },
+  authSwitch: {
+    textAlign: "center",
+    fontSize: 13,
+    color: "#888",
+    marginTop: 16,
+  },
+  authLink: {
+    color: "#4f86c6",
+    cursor: "pointer",
+    fontWeight: "bold",
+  },
   page: {
     display: "flex",
     minHeight: "100vh",
@@ -415,6 +624,8 @@ const styles = {
     background: "#1a1a2e",
     padding: 20,
     flexShrink: 0,
+    display: "flex",
+    flexDirection: "column",
   },
   sidebarHeader: {
     display: "flex",
@@ -517,6 +728,27 @@ const styles = {
     fontSize: 12,
     padding: 2,
   },
+  logoutSection: {
+    marginTop: "auto",
+    paddingTop: 16,
+    borderTop: "1px solid #2a2a3e",
+  },
+  userEmail: {
+    color: "#888",
+    fontSize: 11,
+    margin: "0 0 8px 0",
+    wordBreak: "break-all",
+  },
+  logoutButton: {
+    background: "none",
+    border: "1px solid #444",
+    color: "#888",
+    borderRadius: 6,
+    padding: "6px 12px",
+    cursor: "pointer",
+    fontSize: 12,
+    width: "100%",
+  },
   main: {
     flex: 1,
     padding: "40px 32px",
@@ -562,10 +794,7 @@ const styles = {
     width: 180,
     background: "white",
   },
-  fileInput: {
-    display: "block",
-    fontSize: 14,
-  },
+  fileInput: { display: "block", fontSize: 14 },
   fileName: { color: "#555", fontSize: 14, marginBottom: 12 },
   button: {
     background: "#4f86c6",
@@ -587,10 +816,7 @@ const styles = {
     cursor: "not-allowed",
     fontWeight: "bold",
   },
-  noPeopleMsg: {
-    color: "#888",
-    fontSize: 14,
-  },
+  noPeopleMsg: { color: "#888", fontSize: 14 },
   error: { color: "#e05c5c", marginTop: 12 },
   resultLabel: {
     fontSize: 18,

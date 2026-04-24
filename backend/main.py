@@ -1,10 +1,11 @@
-from fastapi import FastAPI, Form, UploadFile, File, Depends
+from fastapi import FastAPI, UploadFile, File, Depends, Form, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pypdf import PdfReader
 from anthropic import Anthropic
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
-from models import Statement, create_tables, get_db
+from models import Statement, Person, User, create_tables, get_db
+from auth import hash_password, verify_password, create_access_token, get_current_user
 import io
 import json
 import os
@@ -21,10 +22,90 @@ app.add_middleware(
 )
 
 client = Anthropic()
-
-# Create tables on startup
 create_tables()
 
+
+# ── Auth ──────────────────────────────────────────────
+
+@app.post("/signup")
+async def signup(
+    email: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    existing = db.query(User).filter(User.email == email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    user = User(email=email, hashed_password=hash_password(password))
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    token = create_access_token({"sub": user.email})
+    return {"access_token": token, "token_type": "bearer", "email": user.email}
+
+
+@app.post("/login")
+async def login(
+    email: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    user = db.query(User).filter(User.email == email).first()
+    if not user or not verify_password(password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = create_access_token({"sub": user.email})
+    return {"access_token": token, "token_type": "bearer", "email": user.email}
+
+
+@app.get("/me")
+async def get_me(current_user: User = Depends(get_current_user)):
+    return {"email": current_user.email, "id": current_user.id}
+
+
+# ── People ────────────────────────────────────────────
+
+@app.post("/people")
+async def create_person(
+    name: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    person = Person(name=name, user_id=current_user.id)
+    db.add(person)
+    db.commit()
+    db.refresh(person)
+    return {"id": person.id, "name": person.name}
+
+
+@app.get("/people")
+async def get_people(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    people = db.query(Person).filter(
+        Person.user_id == current_user.id
+    ).order_by(Person.created_at).all()
+    return [{"id": p.id, "name": p.name} for p in people]
+
+
+@app.delete("/people/{person_id}")
+async def delete_person(
+    person_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    person = db.query(Person).filter(
+        Person.id == person_id,
+        Person.user_id == current_user.id
+    ).first()
+    if not person:
+        raise HTTPException(status_code=404, detail="Person not found")
+    db.delete(person)
+    db.commit()
+    return {"message": "Deleted successfully"}
+
+
+# ── Statements ────────────────────────────────────────
 
 def extract_text_from_pdf(file_bytes):
     pdf = PdfReader(io.BytesIO(file_bytes))
@@ -73,16 +154,11 @@ Statement:
     )
 
     raw = message.content[0].text.strip()
-    print("=== CLAUDE RESPONSE ===")
-    print(raw[:1000])
-    print("=== END RESPONSE ===")
-
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
     raw = raw.strip()
-
     return json.loads(raw)
 
 
@@ -132,19 +208,12 @@ Spending data:
     )
 
     raw = message.content[0].text.strip()
-
-    print("=== INSIGHTS RESPONSE ===")
-    print(raw[:500])
-    print("=== END INSIGHTS ===")
-
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
     raw = raw.strip()
-
     insights = json.loads(raw)
-
     return {**summary_data, "insights": insights}
 
 
@@ -154,9 +223,11 @@ async def analyze(
     person_name: str = Form("Me"),
     person_id: int = Form(None),
     month: str = Form(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     print(f"=== RECEIVED person_name: {person_name}, person_id: {person_id} ===")
+
     contents = await file.read()
     text = extract_text_from_pdf(contents)
 
@@ -168,12 +239,10 @@ async def analyze(
     result = generate_insights(transactions)
     result["transactions"] = transactions
 
-    # Detect month from transactions if not provided
     if not month and transactions:
         first_date = transactions[0]["date"]
-        month = first_date[:7]  # takes YYYY-MM from YYYY-MM-DD
+        month = first_date[:7]
 
-    # Save to database
     statement = Statement(
         person_id=person_id,
         person_name=person_name,
@@ -200,16 +269,24 @@ async def analyze(
 
 
 @app.get("/statements")
-async def get_statements(db: Session = Depends(get_db)):
-    statements = db.query(Statement).order_by(Statement.uploaded_at.desc()).all()
+async def get_statements(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    people = db.query(Person).filter(Person.user_id == current_user.id).all()
+    person_ids = [p.id for p in people]
+    statements = db.query(Statement).filter(
+        Statement.person_id.in_(person_ids)
+    ).order_by(Statement.uploaded_at.desc()).all()
     return [
         {
             "id": s.id,
             "person_name": s.person_name,
+            "person_id": s.person_id,
             "month": s.month,
             "totals": s.totals,
             "insights": s.insights,
-            "uploaded_at": s.uploaded_at,
+            "uploaded_at": str(s.uploaded_at),
             "transactions": s.transactions
         }
         for s in statements
@@ -217,10 +294,14 @@ async def get_statements(db: Session = Depends(get_db)):
 
 
 @app.get("/statements/{statement_id}")
-async def get_statement(statement_id: int, db: Session = Depends(get_db)):
+async def get_statement(
+    statement_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     statement = db.query(Statement).filter(Statement.id == statement_id).first()
     if not statement:
-        return {"error": "Statement not found"}
+        raise HTTPException(status_code=404, detail="Statement not found")
     return {
         "id": statement.id,
         "person_name": statement.person_name,
@@ -228,44 +309,23 @@ async def get_statement(statement_id: int, db: Session = Depends(get_db)):
         "totals": statement.totals,
         "insights": statement.insights,
         "transactions": statement.transactions,
-        "uploaded_at": statement.uploaded_at
+        "uploaded_at": str(statement.uploaded_at)
     }
 
+
 @app.delete("/statements/{statement_id}")
-async def delete_statement(statement_id: int, db: Session = Depends(get_db)):
+async def delete_statement(
+    statement_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     statement = db.query(Statement).filter(Statement.id == statement_id).first()
     if not statement:
-        return {"error": "Statement not found"}
+        raise HTTPException(status_code=404, detail="Statement not found")
     db.delete(statement)
     db.commit()
     return {"message": "Deleted successfully"}
 
-@app.post("/people")
-async def create_person(name: str, db: Session = Depends(get_db)):
-    from models import Person
-    person = Person(name=name)
-    db.add(person)
-    db.commit()
-    db.refresh(person)
-    return {"id": person.id, "name": person.name}
-
-
-@app.get("/people")
-async def get_people(db: Session = Depends(get_db)):
-    from models import Person
-    people = db.query(Person).order_by(Person.created_at).all()
-    return [{"id": p.id, "name": p.name} for p in people]
-
-
-@app.delete("/people/{person_id}")
-async def delete_person(person_id: int, db: Session = Depends(get_db)):
-    from models import Person
-    person = db.query(Person).filter(Person.id == person_id).first()
-    if not person:
-        return {"error": "Person not found"}
-    db.delete(person)
-    db.commit()
-    return {"message": "Deleted successfully"}
 
 @app.get("/health")
 async def health():

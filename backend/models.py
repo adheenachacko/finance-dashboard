@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, JSON, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, JSON, DateTime, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
@@ -14,13 +14,25 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    people = relationship("Person", back_populates="user")
+
+
 class Person(Base):
     __tablename__ = "people"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     name = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     statements = relationship("Statement", back_populates="person")
+    user = relationship("User", back_populates="people")
 
 
 class Statement(Base):
