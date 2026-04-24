@@ -1,8 +1,10 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pypdf import PdfReader
 from anthropic import Anthropic
+from sqlalchemy.orm import Session
 from dotenv import load_dotenv
+from models import Statement, create_tables, get_db
 import io
 import json
 import os
@@ -19,6 +21,10 @@ app.add_middleware(
 )
 
 client = Anthropic()
+
+# Create tables on startup
+create_tables()
+
 
 def extract_text_from_pdf(file_bytes):
     pdf = PdfReader(io.BytesIO(file_bytes))
@@ -71,7 +77,6 @@ Statement:
     print(raw[:1000])
     print("=== END RESPONSE ===")
 
-    # Strip markdown code blocks if Claude adds them
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -82,12 +87,10 @@ Statement:
 
 
 def generate_insights(transactions):
-    # Calculate totals
     income = sum(t["amount"] for t in transactions if t["amount"] > 0)
     spending = sum(t["amount"] for t in transactions if t["amount"] < 0)
-    savings = income + spending  # spending is negative so this works
+    savings = income + spending
 
-    # Group by category
     categories = {}
     for t in transactions:
         if t["amount"] < 0:
@@ -129,46 +132,111 @@ Spending data:
     )
 
     raw = message.content[0].text.strip()
-    
+
     print("=== INSIGHTS RESPONSE ===")
     print(raw[:500])
     print("=== END INSIGHTS ===")
-    
-    # Strip markdown code blocks if Claude wraps in them
+
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
     raw = raw.strip()
-    
+
     insights = json.loads(raw)
 
     return {**summary_data, "insights": insights}
 
 
 @app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
+async def analyze(
+    file: UploadFile = File(...),
+    person_name: str = "Me",
+    month: str = None,
+    db: Session = Depends(get_db)
+):
     contents = await file.read()
     text = extract_text_from_pdf(contents)
-    
-    print(f"Total pages extracted: {len(PdfReader(io.BytesIO(contents)).pages)}")
-    print("=== EXTRACTED TEXT ===")
-    print(text[:500])
-    print("=== END TEXT ===")
 
     if not text.strip():
-        return {"error": "Could not extract text from this PDF. Try a different file."}
+        return {"error": "Could not extract text from this PDF."}
 
     transaction_data = categorize_transactions(text)
     transactions = transaction_data["transactions"]
     result = generate_insights(transactions)
     result["transactions"] = transactions
 
-    print("=== FINAL RESULT ===")
-    print(result)
-    print("=== END RESULT ===")
+    # Detect month from transactions if not provided
+    if not month and transactions:
+        first_date = transactions[0]["date"]
+        month = first_date[:7]  # takes YYYY-MM from YYYY-MM-DD
+
+    # Save to database
+    statement = Statement(
+        person_name=person_name,
+        month=month,
+        transactions=transactions,
+        totals={
+            "income": result["income"],
+            "spending": result["spending"],
+            "savings": result["savings"],
+            "savings_rate": result["savings_rate"],
+            "categories": result["categories"]
+        },
+        insights=result["insights"]
+    )
+    db.add(statement)
+    db.commit()
+    db.refresh(statement)
+
+    result["id"] = statement.id
+    result["month"] = month
+    result["person_name"] = person_name
 
     return result
+
+
+@app.get("/statements")
+async def get_statements(db: Session = Depends(get_db)):
+    statements = db.query(Statement).order_by(Statement.uploaded_at.desc()).all()
+    return [
+        {
+            "id": s.id,
+            "person_name": s.person_name,
+            "month": s.month,
+            "totals": s.totals,
+            "insights": s.insights,
+            "uploaded_at": s.uploaded_at,
+            "transactions": s.transactions
+        }
+        for s in statements
+    ]
+
+
+@app.get("/statements/{statement_id}")
+async def get_statement(statement_id: int, db: Session = Depends(get_db)):
+    statement = db.query(Statement).filter(Statement.id == statement_id).first()
+    if not statement:
+        return {"error": "Statement not found"}
+    return {
+        "id": statement.id,
+        "person_name": statement.person_name,
+        "month": statement.month,
+        "totals": statement.totals,
+        "insights": statement.insights,
+        "transactions": statement.transactions,
+        "uploaded_at": statement.uploaded_at
+    }
+
+@app.delete("/statements/{statement_id}")
+async def delete_statement(statement_id: int, db: Session = Depends(get_db)):
+    statement = db.query(Statement).filter(Statement.id == statement_id).first()
+    if not statement:
+        return {"error": "Statement not found"}
+    db.delete(statement)
+    db.commit()
+    return {"message": "Deleted successfully"}
+
 
 @app.get("/health")
 async def health():
