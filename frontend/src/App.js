@@ -20,12 +20,29 @@ export default function App() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [people, setPeople] = useState([]);
   const [statements, setStatements] = useState([]);
-  const [personName, setPersonName] = useState("Me");
+  const [selectedPersonId, setSelectedPersonId] = useState("");
+  const [newPersonName, setNewPersonName] = useState("");
+  const [showAddPerson, setShowAddPerson] = useState(false);
 
   useEffect(() => {
+    fetchPeople();
     fetchStatements();
   }, []);
+
+  const fetchPeople = async () => {
+    try {
+      const response = await fetch("http://localhost:8000/people");
+      const data = await response.json();
+      setPeople(data);
+      if (data.length > 0 && !selectedPersonId) {
+        setSelectedPersonId(data[0].id);
+      }
+    } catch {
+      console.log("Could not fetch people");
+    }
+  };
 
   const fetchStatements = async () => {
     try {
@@ -37,25 +54,55 @@ export default function App() {
     }
   };
 
+  const addPerson = async () => {
+    if (!newPersonName.trim()) return;
+    try {
+      const response = await fetch(
+        `http://localhost:8000/people?name=${encodeURIComponent(newPersonName)}`,
+        { method: "POST" }
+      );
+      const data = await response.json();
+      setNewPersonName("");
+      setShowAddPerson(false);
+      await fetchPeople();
+      setSelectedPersonId(data.id);
+    } catch {
+      console.log("Could not add person");
+    }
+  };
+
+  const deletePerson = async (id, e) => {
+    e.stopPropagation();
+    if (!window.confirm("Delete this person and all their statements?")) return;
+    try {
+      await fetch(`http://localhost:8000/people/${id}`, { method: "DELETE" });
+      fetchPeople();
+      fetchStatements();
+      setResult(null);
+    } catch {
+      console.log("Could not delete person");
+    }
+  };
+
   const handleAnalyze = async () => {
-    if (!file) return;
+    if (!file || !selectedPersonId) return;
     setLoading(true);
     setError(null);
     setResult(null);
 
+    const selectedPerson = people.find(p => p.id === parseInt(selectedPersonId));
     const formData = new FormData();
     formData.append("file", file);
-    formData.append("person_name", personName);
+    formData.append("person_name", selectedPerson?.name || "Me");
+    formData.append("person_id", selectedPersonId);
 
     try {
       const response = await fetch("http://localhost:8000/analyze", {
         method: "POST",
         body: formData,
       });
-
       const text = await response.text();
       const data = JSON.parse(text);
-
       if (data.error) {
         setError(data.error);
       } else {
@@ -78,7 +125,8 @@ export default function App() {
         insights: data.insights,
         transactions: data.transactions,
         month: data.month,
-        person_name: data.person_name
+        person_name: data.person_name,
+        id: data.id
       });
     } catch {
       console.log("Could not load statement");
@@ -89,9 +137,7 @@ export default function App() {
     e.stopPropagation();
     if (!window.confirm("Delete this statement?")) return;
     try {
-      await fetch(`http://localhost:8000/statements/${id}`, {
-        method: "DELETE",
-      });
+      await fetch(`http://localhost:8000/statements/${id}`, { method: "DELETE" });
       fetchStatements();
       if (result?.id === id) setResult(null);
     } catch {
@@ -101,39 +147,86 @@ export default function App() {
 
   const chartData = result
     ? Object.entries(result.categories || {}).map(([name, value]) => ({
-      name,
-      amount: value,
-    }))
+        name,
+        amount: value,
+      }))
     : [];
+
+  // Group statements by person
+  const statementsByPerson = people.map(person => ({
+  ...person,
+  statements: statements.filter(s => 
+    s.person_name === person.name || s.person_id === person.id
+  )
+}));
 
   return (
     <div style={styles.page}>
 
       {/* Sidebar */}
       <div style={styles.sidebar}>
-        <h2 style={styles.sidebarTitle}>History</h2>
-        {statements.length === 0 && (
-          <p style={styles.sidebarEmpty}>No statements yet</p>
-        )}
-        {statements.map((s) => (
-          <div
-            key={s.id}
-            onClick={() => loadStatement(s.id)}
-            style={styles.sidebarItem}
+        <div style={styles.sidebarHeader}>
+          <h2 style={styles.sidebarTitle}>People</h2>
+          <button
+            onClick={() => setShowAddPerson(!showAddPerson)}
+            style={styles.addButton}
           >
-            <div style={styles.sidebarTop}>
-              <p style={styles.sidebarPerson}>{s.person_name}</p>
+            +
+          </button>
+        </div>
+
+        {showAddPerson && (
+          <div style={styles.addPersonBox}>
+            <input
+              type="text"
+              value={newPersonName}
+              onChange={(e) => setNewPersonName(e.target.value)}
+              placeholder="Name"
+              style={styles.addPersonInput}
+              onKeyDown={(e) => e.key === "Enter" && addPerson()}
+            />
+            <button onClick={addPerson} style={styles.addPersonButton}>
+              Add
+            </button>
+          </div>
+        )}
+
+        {statementsByPerson.map(person => (
+          <div key={person.id} style={styles.personGroup}>
+            <div style={styles.personHeader}>
+              <p style={styles.personName}>{person.name}</p>
               <button
-                onClick={(e) => deleteStatement(s.id, e)}
+                onClick={(e) => deletePerson(person.id, e)}
                 style={styles.deleteButton}
               >
                 ✕
               </button>
             </div>
-            <p style={styles.sidebarMonth}>{s.month}</p>
-            <p style={styles.sidebarAmount}>
-              Saved ${s.totals?.savings?.toLocaleString() || 0}
-            </p>
+
+            {person.statements.length === 0 && (
+              <p style={styles.noStatements}>No statements</p>
+            )}
+
+            {person.statements.map(s => (
+              <div
+                key={s.id}
+                onClick={() => loadStatement(s.id)}
+                style={styles.sidebarItem}
+              >
+                <div style={styles.sidebarTop}>
+                  <p style={styles.sidebarMonth}>{s.month}</p>
+                  <button
+                    onClick={(e) => deleteStatement(s.id, e)}
+                    style={styles.deleteButton}
+                  >
+                    ✕
+                  </button>
+                </div>
+                <p style={styles.sidebarAmount}>
+                  Saved ${s.totals?.savings?.toLocaleString() || 0}
+                </p>
+              </div>
+            ))}
           </div>
         ))}
       </div>
@@ -145,35 +238,46 @@ export default function App() {
         {/* Upload Section */}
         <div style={styles.card}>
           <h2 style={styles.cardTitle}>Upload Statement</h2>
-          <div style={styles.uploadRow}>
-            <div>
-              <label style={styles.label}>Person Name</label>
-              <input
-                type="text"
-                value={personName}
-                onChange={(e) => setPersonName(e.target.value)}
-                placeholder="e.g. Adheena"
-                style={styles.input}
-              />
-            </div>
-            <div>
-              <label style={styles.label}>Statement PDF</label>
-              <input
-                type="file"
-                accept=".pdf"
-                onChange={(e) => setFile(e.target.files[0])}
-                style={styles.fileInput}
-              />
-            </div>
-          </div>
-          {file && <p style={styles.fileName}>Selected: {file.name}</p>}
-          <button
-            onClick={handleAnalyze}
-            disabled={!file || loading}
-            style={loading || !file ? styles.buttonDisabled : styles.button}
-          >
-            {loading ? "Analyzing..." : "Analyze Statement"}
-          </button>
+
+          {people.length === 0 ? (
+            <p style={styles.noPeopleMsg}>
+              Add a person using the + button in the sidebar first.
+            </p>
+          ) : (
+            <>
+              <div style={styles.uploadRow}>
+                <div>
+                  <label style={styles.label}>Person</label>
+                  <select
+                    value={selectedPersonId}
+                    onChange={(e) => setSelectedPersonId(e.target.value)}
+                    style={styles.select}
+                  >
+                    {people.map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={styles.label}>Statement PDF</label>
+                  <input
+                    type="file"
+                    accept=".pdf"
+                    onChange={(e) => setFile(e.target.files[0])}
+                    style={styles.fileInput}
+                  />
+                </div>
+              </div>
+              {file && <p style={styles.fileName}>Selected: {file.name}</p>}
+              <button
+                onClick={handleAnalyze}
+                disabled={!file || loading || !selectedPersonId}
+                style={loading || !file ? styles.buttonDisabled : styles.button}
+              >
+                {loading ? "Analyzing..." : "Analyze Statement"}
+              </button>
+            </>
+          )}
           {error && <p style={styles.error}>{error}</p>}
         </div>
 
@@ -312,39 +416,106 @@ const styles = {
     padding: 20,
     flexShrink: 0,
   },
+  sidebarHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 16,
+  },
   sidebarTitle: {
     color: "white",
     fontSize: 16,
     fontWeight: "bold",
-    marginBottom: 16,
+    margin: 0,
   },
-  sidebarEmpty: {
-    color: "#888",
+  addButton: {
+    background: "#4f86c6",
+    color: "white",
+    border: "none",
+    borderRadius: "50%",
+    width: 24,
+    height: 24,
+    cursor: "pointer",
+    fontSize: 16,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  addPersonBox: {
+    background: "#2a2a3e",
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 16,
+    display: "flex",
+    gap: 8,
+  },
+  addPersonInput: {
+    flex: 1,
+    padding: "6px 8px",
+    borderRadius: 4,
+    border: "none",
     fontSize: 13,
+    background: "#1a1a2e",
+    color: "white",
+  },
+  addPersonButton: {
+    background: "#4f86c6",
+    color: "white",
+    border: "none",
+    borderRadius: 4,
+    padding: "6px 10px",
+    cursor: "pointer",
+    fontSize: 13,
+  },
+  personGroup: {
+    marginBottom: 20,
+  },
+  personHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  personName: {
+    color: "#4f86c6",
+    fontWeight: "bold",
+    fontSize: 14,
+    margin: 0,
+  },
+  noStatements: {
+    color: "#555",
+    fontSize: 12,
+    margin: "0 0 8px 0",
   },
   sidebarItem: {
     background: "#2a2a3e",
     borderRadius: 8,
-    padding: 12,
-    marginBottom: 10,
+    padding: 10,
+    marginBottom: 8,
     cursor: "pointer",
-    transition: "background 0.2s",
   },
-  sidebarPerson: {
-    color: "white",
-    fontWeight: "bold",
-    fontSize: 13,
-    margin: "0 0 4px 0",
+  sidebarTop: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
   },
   sidebarMonth: {
-    color: "#4f86c6",
+    color: "white",
     fontSize: 12,
-    margin: "0 0 4px 0",
+    margin: 0,
   },
   sidebarAmount: {
     color: "#2ecc71",
     fontSize: 12,
-    margin: 0,
+    margin: "4px 0 0 0",
+  },
+  deleteButton: {
+    background: "none",
+    border: "none",
+    color: "#888",
+    cursor: "pointer",
+    fontSize: 12,
+    padding: 2,
   },
   main: {
     flex: 1,
@@ -383,12 +554,13 @@ const styles = {
     color: "#555",
     marginBottom: 6,
   },
-  input: {
+  select: {
     padding: "8px 12px",
     borderRadius: 6,
     border: "1px solid #ddd",
     fontSize: 14,
     width: 180,
+    background: "white",
   },
   fileInput: {
     display: "block",
@@ -414,6 +586,10 @@ const styles = {
     fontSize: 16,
     cursor: "not-allowed",
     fontWeight: "bold",
+  },
+  noPeopleMsg: {
+    color: "#888",
+    fontSize: 14,
   },
   error: { color: "#e05c5c", marginTop: 12 },
   resultLabel: {
@@ -492,18 +668,5 @@ const styles = {
     borderRadius: 12,
     fontSize: 12,
     fontWeight: "bold",
-  },
-  sidebarTop: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  deleteButton: {
-    background: "none",
-    border: "none",
-    color: "#888",
-    cursor: "pointer",
-    fontSize: 12,
-    padding: 2,
   },
 };

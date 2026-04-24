@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Depends
+from fastapi import FastAPI, Form, UploadFile, File, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pypdf import PdfReader
 from anthropic import Anthropic
@@ -151,10 +151,12 @@ Spending data:
 @app.post("/analyze")
 async def analyze(
     file: UploadFile = File(...),
-    person_name: str = "Me",
-    month: str = None,
+    person_name: str = Form("Me"),
+    person_id: int = Form(None),
+    month: str = Form(None),
     db: Session = Depends(get_db)
 ):
+    print(f"=== RECEIVED person_name: {person_name}, person_id: {person_id} ===")
     contents = await file.read()
     text = extract_text_from_pdf(contents)
 
@@ -173,6 +175,7 @@ async def analyze(
 
     # Save to database
     statement = Statement(
+        person_id=person_id,
         person_name=person_name,
         month=month,
         transactions=transactions,
@@ -237,6 +240,32 @@ async def delete_statement(statement_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Deleted successfully"}
 
+@app.post("/people")
+async def create_person(name: str, db: Session = Depends(get_db)):
+    from models import Person
+    person = Person(name=name)
+    db.add(person)
+    db.commit()
+    db.refresh(person)
+    return {"id": person.id, "name": person.name}
+
+
+@app.get("/people")
+async def get_people(db: Session = Depends(get_db)):
+    from models import Person
+    people = db.query(Person).order_by(Person.created_at).all()
+    return [{"id": p.id, "name": p.name} for p in people]
+
+
+@app.delete("/people/{person_id}")
+async def delete_person(person_id: int, db: Session = Depends(get_db)):
+    from models import Person
+    person = db.query(Person).filter(Person.id == person_id).first()
+    if not person:
+        return {"error": "Person not found"}
+    db.delete(person)
+    db.commit()
+    return {"message": "Deleted successfully"}
 
 @app.get("/health")
 async def health():
