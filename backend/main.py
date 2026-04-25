@@ -223,6 +223,7 @@ async def analyze(
     person_name: str = Form("Me"),
     person_id: int = Form(None),
     month: str = Form(None),
+    account_name: str = Form("Unknown"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -236,6 +237,10 @@ async def analyze(
 
     transaction_data = categorize_transactions(text)
     new_transactions = transaction_data["transactions"]
+
+    # Tag each transaction with account name
+    for t in new_transactions:
+        t["account"] = account_name
     
 
     # Detect month from transactions if not provided
@@ -250,11 +255,9 @@ async def analyze(
     ).first()
 
     if existing:
-        # Merge transactions — combine existing and new, deduplicate by date+description+amount
         existing_transactions = existing.transactions or []
         all_transactions = existing_transactions + new_transactions
 
-        # Deduplicate
         seen = set()
         merged_transactions = []
         for t in all_transactions:
@@ -263,18 +266,22 @@ async def analyze(
                 seen.add(key)
                 merged_transactions.append(t)
 
-        # Recalculate totals and insights with merged transactions
         result = generate_insights(merged_transactions)
         result["transactions"] = merged_transactions
 
-        # Update existing record
+        # Track which accounts have been uploaded
+        existing_accounts = existing.totals.get("accounts", [])
+        if account_name not in existing_accounts:
+            existing_accounts.append(account_name)
+
         existing.transactions = merged_transactions
         existing.totals = {
             "income": result["income"],
             "spending": result["spending"],
             "savings": result["savings"],
             "savings_rate": result["savings_rate"],
-            "categories": result["categories"]
+            "categories": result["categories"],
+            "accounts": existing_accounts
         }
         existing.insights = result["insights"]
         db.commit()
@@ -285,11 +292,10 @@ async def analyze(
         result["person_name"] = person_name
         result["merged"] = True
         result["transaction_count"] = len(merged_transactions)
+        result["accounts"] = existing_accounts
 
         return result
-
     else:
-        # No existing statement — create new one
         result = generate_insights(new_transactions)
         result["transactions"] = new_transactions
 
@@ -303,7 +309,8 @@ async def analyze(
                 "spending": result["spending"],
                 "savings": result["savings"],
                 "savings_rate": result["savings_rate"],
-                "categories": result["categories"]
+                "categories": result["categories"],
+                "accounts": [account_name]
             },
             insights=result["insights"]
         )
@@ -316,6 +323,7 @@ async def analyze(
         result["person_name"] = person_name
         result["merged"] = False
         result["transaction_count"] = len(new_transactions)
+        result["accounts"] = [account_name]
 
         return result
 
