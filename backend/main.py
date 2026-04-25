@@ -736,6 +736,39 @@ async def update_transaction_category(
 
     return {"message": "Updated", "transactions": transactions, "totals": statement.totals}
 
+@app.post("/statements/{statement_id}/refresh-insights")
+async def refresh_insights(
+    statement_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    statement = db.query(Statement).filter(Statement.id == statement_id).first()
+    if not statement:
+        raise HTTPException(status_code=404, detail="Statement not found")
+
+    result = generate_insights(statement.transactions)
+    
+    totals = dict(statement.totals)
+    totals.update({
+        "income": result["income"],
+        "spending": result["spending"],
+        "savings": result["savings"],
+        "invested": result.get("invested", 0),
+        "total_saved": result.get("total_saved", 0),
+        "savings_rate": result["savings_rate"],
+        "categories": result["categories"]
+    })
+    statement.totals = totals
+    statement.insights = result["insights"]
+    db.commit()
+    db.refresh(statement)
+
+    return {
+        "insights": statement.insights,
+        "totals": statement.totals
+    }
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}

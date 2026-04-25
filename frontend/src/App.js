@@ -99,7 +99,7 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [files, setFiles] = useState([]);
-  const [accountName, setAccountName] = useState("");
+  const [accountNames, setAccountNames] = useState({});
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -158,13 +158,18 @@ export default function App() {
   };
 
   const fetchTrends = async (personId) => {
-    if (!personId) return;
-    try {
-      const response = await fetch(`${API}/trends/${personId}`, { headers: authHeaders() });
-      const data = await response.json();
+  if (!personId) return;
+  try {
+    const response = await fetch(`${API}/trends/${personId}`, { headers: authHeaders() });
+    const data = await response.json();
+    if (Array.isArray(data)) {
       setTrendsData(data);
-    } catch { console.log("Could not fetch trends"); }
-  };
+    } else {
+      setTrendsData([]);
+      console.log("Trends error:", data);
+    }
+  } catch { console.log("Could not fetch trends"); }
+};
 
   const fetchHousehold = async (month) => {
     if (!month) return;
@@ -206,13 +211,13 @@ export default function App() {
 
     try {
       let finalResult = null;
-      for (const f of files) {
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
         const formData = new FormData();
         formData.append("file", f);
         formData.append("person_name", selectedPerson?.name || "Me");
         formData.append("person_id", selectedPersonId);
-        formData.append("account_name", accountName || f.name.replace(".pdf", ""));
-
+        formData.append("account_name", accountNames[i] || f.name.replace(".pdf", ""));
         const response = await fetch(`${API}/analyze`, {
           method: "POST", headers: authHeaders(), body: formData,
         });
@@ -220,15 +225,16 @@ export default function App() {
         const data = JSON.parse(text);
         if (data.error) { setError(data.error); break; }
 
-        if (data.merged && data.accounts?.includes(accountName)) {
+        const acctName = accountNames[i];
+        if (data.merged && data.accounts?.includes(acctName)) {
           const alreadyExists = statements.some(s =>
             (s.person_id === parseInt(selectedPersonId) || s.person_name === selectedPerson?.name) &&
             s.month === data.month &&
-            s.totals?.accounts?.includes(accountName)
+            s.totals?.accounts?.includes(acctName)
           );
           if (alreadyExists) {
             window.confirm(
-              `You already have a "${accountName}" statement for ${formatMonth(data.month)}. It has been updated with the new data.`
+              `You already have a "${acctName}" statement for ${formatMonth(data.month)}. It has been updated with the new data.`
             );
           }
         }
@@ -292,6 +298,28 @@ export default function App() {
     }
   };
 
+  const refreshInsights = async () => {
+    if (!result?.id) return;
+    setLoading(true);
+    try {
+      const response = await fetch(
+        `${API}/statements/${result.id}/refresh-insights`,
+        { method: "POST", headers: authHeaders() }
+      );
+      const data = await response.json();
+      setResult(prev => ({
+        ...prev,
+        ...data.totals,
+        insights: data.insights
+      }));
+      fetchStatements();
+    } catch {
+      console.log("Could not refresh insights");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleLogout = () => {
     localStorage.removeItem("token");
     setUser(null); setPeople([]); setStatements([]); setResult(null);
@@ -317,6 +345,7 @@ export default function App() {
   }));
 
   const existingAccounts = [...new Set(statements.flatMap(s => s.totals?.accounts || []))];
+  const allNamed = files.every((_, i) => accountNames[i]?.trim());
 
   const availableMonths = [...new Set(statements.map(s => s.month))].sort();
 
@@ -429,10 +458,28 @@ export default function App() {
                     </div>
                     <div>
                       <label style={styles.label}>Account Name <span style={{ color: "#e05c5c" }}>*</span></label>
-                      <input type="text" value={accountName}
-                        onChange={(e) => setAccountName(e.target.value)}
-                        placeholder="e.g. Amex, Wells Fargo"
-                        style={styles.input} list="account-suggestions" />
+                      {files.length > 0 && (
+                        <div style={{ marginTop: 12 }}>
+                          {files.map((f, i) => (
+                            <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+                              <span style={{ fontSize: 13, color: "#555", width: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                📄 {f.name}
+                              </span>
+                              <input
+                                type="text"
+                                placeholder="Account name *"
+                                value={accountNames[i] || ""}
+                                onChange={(e) => setAccountNames(prev => ({ ...prev, [i]: e.target.value }))}
+                                style={styles.input}
+                                list="account-suggestions"
+                              />
+                            </div>
+                          ))}
+                          <datalist id="account-suggestions">
+                            {existingAccounts.map((acc, i) => <option key={i} value={acc} />)}
+                          </datalist>
+                        </div>
+                      )}
                       <datalist id="account-suggestions">
                         {existingAccounts.map((acc, i) => <option key={i} value={acc} />)}
                       </datalist>
@@ -449,12 +496,9 @@ export default function App() {
                       {files.length === 1 ? files[0].name : `${files.length} files selected`}
                     </p>
                   )}
-                  {!accountName.trim() && files.length > 0 && (
-                    <p style={styles.requiredHint}>Please enter an account name before analyzing.</p>
-                  )}
                   <button onClick={handleAnalyze}
-                    disabled={!files.length || loading || !selectedPersonId || !accountName.trim()}
-                    style={loading || !files.length || !accountName.trim() ? styles.buttonDisabled : styles.button}>
+                    disabled={!files.length || loading || !selectedPersonId || !allNamed}
+                    style={loading || !files.length || !allNamed ? styles.buttonDisabled : styles.button}>
                     {loading ? "Analyzing..." : "Analyze Statement"}
                   </button>
                 </>
@@ -511,7 +555,12 @@ export default function App() {
                 </div>
 
                 <div style={styles.card}>
-                  <h2 style={styles.cardTitle}>AI Insights</h2>
+                  <div style={styles.tableHeader}>
+                    <h2 style={styles.cardTitle}>AI Insights</h2>
+                    <button onClick={refreshInsights} disabled={loading} style={styles.clearFilter}>
+                      ↻ Refresh Insights
+                    </button>
+                  </div>
                   <p style={styles.summary}>{result.insights?.summary}</p>
                   <div style={styles.insightBox}>
                     <p style={styles.insightLabel}>What you are doing well</p>
