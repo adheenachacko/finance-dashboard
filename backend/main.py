@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Depends, Form, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm.attributes import flag_modified
 from pypdf import PdfReader
 from anthropic import Anthropic
 from sqlalchemy.orm import Session
@@ -272,6 +273,10 @@ Rules:
 - Only extract actual purchase transactions and payments
 - Return only valid JSON, absolutely no other text
 - Any transfer to Vanguard, Fidelity, Schwab, Robinhood, or similar investment platforms should be categorized as Investment
+- category must be one of exactly these: Food, Transport, Shopping, Subscriptions, Utilities, Healthcare, Entertainment, Income, Investment, Transfer, Other
+- Credit card payments (e.g. "AMEX PAYMENT", "CHASE PAYMENT", "CITI PAYMENT") should be categorized as Transfer
+- Internal transfers between your own accounts should be categorized as Transfer
+- Transfers to investment accounts like Vanguard, Fidelity, Schwab = Investment
 
 
 Statement:
@@ -288,21 +293,60 @@ Statement:
     raw = raw.strip()
     return json.loads(raw)
 
+def auto_exclude_matching_returns(transactions):
+    from collections import defaultdict
+    
+    merchant_transactions = defaultdict(list)
+    
+    for i, t in enumerate(transactions):
+        # Create a simplified merchant key from description
+        key = t["description"][:20].strip().lower()
+        merchant_transactions[key].append((i, t["amount"]))
+    
+    excluded_indices = set()
+    
+    for key, txs in merchant_transactions.items():
+        if len(txs) < 2:
+            continue
+        
+        amounts = [amt for _, amt in txs]
+        indices = [idx for idx, _ in txs]
+        
+        # Look for pairs that cancel out
+        for i in range(len(amounts)):
+            for j in range(i + 1, len(amounts)):
+                if abs(amounts[i] + amounts[j]) < 0.01:  # they cancel out
+                    excluded_indices.add(indices[i])
+                    excluded_indices.add(indices[j])
+    
+    for i, t in enumerate(transactions):
+        if i in excluded_indices and not t.get("excluded", False):
+            t["excluded"] = True
+            t["auto_excluded"] = True  # flag so user knows it was automatic
+    
+    return transactions, len(excluded_indices) // 2
 
 def generate_insights(transactions):
-    income = sum(t["amount"] for t in transactions if t["amount"] > 0 and t.get("category") != "Investment")
-    spending = sum(t["amount"] for t in transactions if t["amount"] < 0 and t.get("category") not in ["Investment"])
-    invested = sum(abs(t["amount"]) for t in transactions if t.get("category") == "Investment")
-    savings = income + spending  # spending is negative so this works
+    active = [t for t in transactions if not t.get("excluded", False)]
+    
+    income = sum(t["amount"] for t in active 
+             if t["amount"] > 0 
+             and t.get("category") not in ["Investment", "Transfer"])
+
+    spending = sum(t["amount"] for t in active 
+               if t["amount"] < 0 
+               and t.get("category") not in ["Investment", "Transfer"])
+    invested = sum(abs(t["amount"]) for t in active if t.get("category") == "Investment")
+    savings = income + spending
     total_saved = savings + invested
 
     categories = {}
-    for t in transactions:
+    for t in active:
         if t["amount"] < 0 and t.get("category") not in ["Investment"]:
             cat = t["category"]
             categories[cat] = categories.get(cat, 0) + abs(t["amount"])
 
-    total_income = income + invested  # true income includes what you invest
+    total_income = income + invested
     savings_rate = round((total_saved / total_income * 100), 1) if total_income > 0 else 0
 
     summary_data = {
@@ -376,6 +420,10 @@ async def analyze(
             return {"error": "Could not parse this CSV. Make sure it is a Venmo statement."}
 
         all_transactions = categorize_venmo_transactions(all_transactions)
+
+        new_transactions, auto_excluded_count = auto_exclude_matching_returns(new_transactions)
+        if auto_excluded_count > 0:
+            print(f"Auto-excluded {auto_excluded_count} matching return pairs")
 
         # Tag with account name
         for t in all_transactions:
@@ -702,10 +750,11 @@ async def get_household(
     }
 
 @app.patch("/statements/{statement_id}/transaction/{transaction_index}")
-async def update_transaction_category(
+async def update_transaction(
     statement_id: int,
     transaction_index: int,
-    category: str = Form(...),
+    category: str = Form(None),
+    excluded: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -717,25 +766,57 @@ async def update_transaction_category(
     if transaction_index >= len(transactions):
         raise HTTPException(status_code=400, detail="Transaction index out of range")
 
-    transactions[transaction_index]["category"] = category
+    if category is not None:
+        transactions[transaction_index]["category"] = category
+    
+    if excluded is not None:
+        transactions[transaction_index]["excluded"] = excluded == "true"
+
     statement.transactions = transactions
 
-    # Recalculate totals
+    # Recalculate totals excluding excluded and investment transactions
+    income = sum(t["amount"] for t in active 
+             if t["amount"] > 0 
+             and t.get("category") not in ["Investment", "Transfer"])
+
+    spending = sum(t["amount"] for t in active 
+               if t["amount"] < 0 
+               and t.get("category") not in ["Investment", "Transfer"])
+    
+    invested = sum(abs(t["amount"]) for t in transactions 
+                   if t.get("category") == "Investment"
+                   and not t.get("excluded", False))
+    
+    savings = income + spending
+    total_income = income + invested
+    savings_rate = round((savings + invested) / total_income * 100, 1) if total_income > 0 else 0
+
     categories = {}
     for t in transactions:
-        if t["amount"] < 0:
+        if (t["amount"] < 0 
+            and t.get("category") not in ["Investment"]
+            and not t.get("excluded", False)):
             cat = t["category"]
             categories[cat] = categories.get(cat, 0) + abs(t["amount"])
 
     totals = dict(statement.totals)
-    totals["categories"] = {k: round(v, 2) for k, v in categories.items()}
+    totals.update({
+        "income": round(income, 2),
+        "spending": round(abs(spending), 2),
+        "savings": round(savings, 2),
+        "invested": round(invested, 2),
+        "total_saved": round(savings + invested, 2),
+        "savings_rate": savings_rate,
+        "categories": {k: round(v, 2) for k, v in categories.items()}
+    })
+    statement.transactions = transactions
     statement.totals = totals
-
+    flag_modified(statement, "transactions")
+    flag_modified(statement, "totals")
     db.commit()
     db.refresh(statement)
 
     return {"message": "Updated", "transactions": transactions, "totals": statement.totals}
-
 @app.post("/statements/{statement_id}/refresh-insights")
 async def refresh_insights(
     statement_id: int,
@@ -760,6 +841,8 @@ async def refresh_insights(
     })
     statement.totals = totals
     statement.insights = result["insights"]
+    flag_modified(statement, "totals")
+    flag_modified(statement, "insights")
     db.commit()
     db.refresh(statement)
 

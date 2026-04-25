@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, Cell,
@@ -116,6 +116,14 @@ export default function App() {
   const [householdMonth, setHouseholdMonth] = useState("");
   const [householdData, setHouseholdData] = useState(null);
   const [editingCategory, setEditingCategory] = useState(null);
+  const [refreshingInsights, setRefreshingInsights] = useState(false);
+  const [totalsFilter, setTotalsFilter] = useState(null);
+  const abortControllerRef = useRef(null);
+  const [tableSearch, setTableSearch] = useState("");
+  const [tableAccountFilter, setTableAccountFilter] = useState("");
+  const [tableCategoryFilter, setTableCategoryFilter] = useState("");
+  const [tableStatusFilter, setTableStatusFilter] = useState("all");
+  const [tableSort, setTableSort] = useState({ col: null, dir: "asc" });
 
   useEffect(() => {
     const token = getToken();
@@ -158,18 +166,18 @@ export default function App() {
   };
 
   const fetchTrends = async (personId) => {
-  if (!personId) return;
-  try {
-    const response = await fetch(`${API}/trends/${personId}`, { headers: authHeaders() });
-    const data = await response.json();
-    if (Array.isArray(data)) {
-      setTrendsData(data);
-    } else {
-      setTrendsData([]);
-      console.log("Trends error:", data);
-    }
-  } catch { console.log("Could not fetch trends"); }
-};
+    if (!personId) return;
+    try {
+      const response = await fetch(`${API}/trends/${personId}`, { headers: authHeaders() });
+      const data = await response.json();
+      if (Array.isArray(data)) {
+        setTrendsData(data);
+      } else {
+        setTrendsData([]);
+        console.log("Trends error:", data);
+      }
+    } catch { console.log("Could not fetch trends"); }
+  };
 
   const fetchHousehold = async (month) => {
     if (!month) return;
@@ -209,6 +217,9 @@ export default function App() {
     const selectedPerson = people.find(p => p.id === parseInt(selectedPersonId));
     setLoading(true); setError(null); setResult(null);
 
+    abortControllerRef.current = new AbortController();
+    const signal = abortControllerRef.current.signal;
+
     try {
       let finalResult = null;
       for (let i = 0; i < files.length; i++) {
@@ -219,7 +230,7 @@ export default function App() {
         formData.append("person_id", selectedPersonId);
         formData.append("account_name", accountNames[i] || f.name.replace(".pdf", ""));
         const response = await fetch(`${API}/analyze`, {
-          method: "POST", headers: authHeaders(), body: formData,
+          method: "POST", headers: authHeaders(), body: formData, signal
         });
         const text = await response.text();
         const data = JSON.parse(text);
@@ -243,10 +254,37 @@ export default function App() {
       }
       if (finalResult) { setResult(finalResult); fetchStatements(); }
     } catch (err) {
-      setError("Error: " + err.message);
+      if (err.name === "AbortError") {
+        setError("Analysis cancelled.");
+      } else {
+        setError("Error: " + err.message);
+      }
     } finally {
       setLoading(false);
+      abortControllerRef.current = null;
     }
+  };
+
+  const handleCancel = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      setLoading(false);
+      setError("Analysis cancelled.");
+    }
+  };
+
+  const removeFile = (indexToRemove) => {
+    setFiles(prev => prev.filter((_, idx) => idx !== indexToRemove));
+    setAccountNames(prev => {
+      const updated = {};
+      Object.entries(prev).forEach(([k, v]) => {
+        const ki = parseInt(k);
+        if (ki < indexToRemove) updated[ki] = v;
+        else if (ki > indexToRemove) updated[ki - 1] = v;
+      });
+      return updated;
+    });
   };
 
   const loadStatement = async (id) => {
@@ -263,6 +301,7 @@ export default function App() {
         accounts: data.totals?.accounts || []
       });
       setCategoryFilter(null);
+      setTotalsFilter(null);
       setActiveTab("upload");
     } catch { console.log("Could not load statement"); }
   };
@@ -298,9 +337,30 @@ export default function App() {
     }
   };
 
+  const toggleExcluded = async (transactionIndex, currentExcluded) => {
+    if (!result?.id) return;
+    try {
+      const formData = new FormData();
+      formData.append("excluded", (!currentExcluded).toString());
+      const response = await fetch(
+        `${API}/statements/${result.id}/transaction/${transactionIndex}`,
+        { method: "PATCH", headers: authHeaders(), body: formData }
+      );
+      const data = await response.json();
+      setResult(prev => ({
+        ...prev,
+        ...data.totals,
+        transactions: data.transactions,
+        categories: data.totals.categories
+      }));
+    } catch {
+      console.log("Could not toggle transaction");
+    }
+  };
+
   const refreshInsights = async () => {
     if (!result?.id) return;
-    setLoading(true);
+    setRefreshingInsights(true);
     try {
       const response = await fetch(
         `${API}/statements/${result.id}/refresh-insights`,
@@ -316,7 +376,7 @@ export default function App() {
     } catch {
       console.log("Could not refresh insights");
     } finally {
-      setLoading(false);
+      setRefreshingInsights(false);
     }
   };
 
@@ -334,19 +394,79 @@ export default function App() {
     : [];
 
   const filteredTransactions = result?.transactions
-    ? categoryFilter ? result.transactions.filter(t => t.category === categoryFilter) : result.transactions
+    ? (() => {
+      let txs = result.transactions.map((t, originalIndex) => ({ ...t, originalIndex }));
+
+      // Existing totals/category filters
+      if (categoryFilter) {
+        txs = txs.filter(t => t.category === categoryFilter);
+      } else if (totalsFilter === "spending") {
+        txs = txs.filter(t => t.amount < 0 && t.category !== "Investment");
+      } else if (totalsFilter === "income") {
+        txs = txs.filter(t => t.amount > 0 && t.category !== "Investment");
+      } else if (totalsFilter === "invested") {
+        txs = txs.filter(t => t.category === "Investment");
+      }
+
+      // Table filters
+      if (tableSearch) {
+        txs = txs.filter(t =>
+          t.description?.toLowerCase().includes(tableSearch.toLowerCase()) ||
+          t.note?.toLowerCase().includes(tableSearch.toLowerCase())
+        );
+      }
+      if (tableAccountFilter) {
+        txs = txs.filter(t => t.account === tableAccountFilter);
+      }
+      if (tableCategoryFilter) {
+        txs = txs.filter(t => t.category === tableCategoryFilter);
+      }
+      if (tableStatusFilter === "active") {
+        txs = txs.filter(t => !t.excluded);
+      } else if (tableStatusFilter === "excluded") {
+        txs = txs.filter(t => t.excluded);
+      }
+
+      // Sort
+      if (tableSort.col === "date") {
+        txs = [...txs].sort((a, b) =>
+          tableSort.dir === "asc"
+            ? a.date.localeCompare(b.date)
+            : b.date.localeCompare(a.date)
+        );
+      } else if (tableSort.col === "amount") {
+        txs = [...txs].sort((a, b) =>
+          tableSort.dir === "asc"
+            ? a.amount - b.amount
+            : b.amount - a.amount
+        );
+      }
+
+      return txs;
+    })()
     : [];
 
   const statementsByPerson = people.map(person => ({
     ...person,
-    statements: statements.filter(s =>
-      s.person_id === person.id || s.person_name === person.name
-    )
+    statements: statements
+      .filter(s => s.person_id === person.id || s.person_name === person.name)
+      .sort((a, b) => b.month.localeCompare(a.month))
   }));
-
   const existingAccounts = [...new Set(statements.flatMap(s => s.totals?.accounts || []))];
   const allNamed = files.every((_, i) => accountNames[i]?.trim());
-
+  const statementAccounts = result?.transactions
+    ? [...new Set(result.transactions.map(t => t.account).filter(Boolean))]
+    : [];
+  const rollingAverages = trendsData.length >= 2 ? trendsData.map((d, i) => {
+    const window = trendsData.slice(Math.max(0, i - 2), i + 1);
+    const avg = (arr, key) => Math.round(arr.reduce((s, x) => s + x[key], 0) / arr.length);
+    return {
+      month: d.month,
+      avg_savings_rate: avg(window, "savings_rate"),
+      avg_spending: avg(window, "spending"),
+      avg_income: avg(window, "income"),
+    };
+  }) : [];
   const availableMonths = [...new Set(statements.map(s => s.month))].sort();
 
   if (checkingAuth) return <div style={styles.loading}>Loading...</div>;
@@ -457,50 +577,65 @@ export default function App() {
                       </select>
                     </div>
                     <div>
-                      <label style={styles.label}>Account Name <span style={{ color: "#e05c5c" }}>*</span></label>
-                      {files.length > 0 && (
-                        <div style={{ marginTop: 12 }}>
-                          {files.map((f, i) => (
-                            <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
-                              <span style={{ fontSize: 13, color: "#555", width: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                📄 {f.name}
-                              </span>
-                              <input
-                                type="text"
-                                placeholder="Account name *"
-                                value={accountNames[i] || ""}
-                                onChange={(e) => setAccountNames(prev => ({ ...prev, [i]: e.target.value }))}
-                                style={styles.input}
-                                list="account-suggestions"
-                              />
-                            </div>
-                          ))}
-                          <datalist id="account-suggestions">
-                            {existingAccounts.map((acc, i) => <option key={i} value={acc} />)}
-                          </datalist>
-                        </div>
-                      )}
-                      <datalist id="account-suggestions">
-                        {existingAccounts.map((acc, i) => <option key={i} value={acc} />)}
-                      </datalist>
-                    </div>
-                    <div>
-                      <label style={styles.label}>Statement PDF(s)</label>
+                      <label style={styles.label}>
+                        {files.length > 0 ? "Add More Files" : "Statement PDF(s) or CSV"}
+                      </label>
                       <input type="file" accept=".pdf,.csv" multiple
-                        onChange={(e) => setFiles(Array.from(e.target.files))}
+                        onChange={(e) => {
+                          const newFiles = Array.from(e.target.files);
+                          setFiles(prev => {
+                            const existingNames = prev.map(f => f.name);
+                            const unique = newFiles.filter(f => !existingNames.includes(f.name));
+                            return [...prev, ...unique];
+                          });
+                          e.target.value = "";
+                        }}
                         style={styles.fileInput} />
                     </div>
                   </div>
+
                   {files.length > 0 && (
-                    <p style={styles.fileName}>
-                      {files.length === 1 ? files[0].name : `${files.length} files selected`}
-                    </p>
+                    <div style={{ marginBottom: 16 }}>
+                      <datalist id="account-suggestions">
+                        {existingAccounts.map((acc, i) => <option key={i} value={acc} />)}
+                      </datalist>
+                      {files.map((f, i) => (
+                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+                          <span style={{ fontSize: 13, color: "#555", width: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            📄 {f.name}
+                          </span>
+                          <input
+                            type="text"
+                            placeholder="Account name *"
+                            value={accountNames[i] || ""}
+                            onChange={(e) => setAccountNames(prev => ({ ...prev, [i]: e.target.value }))}
+                            style={styles.input}
+                            list="account-suggestions"
+                          />
+                          <button onClick={() => removeFile(i)} style={styles.removeFileButton}>✕</button>
+                        </div>
+                      ))}
+                      <button
+                        onClick={() => { setFiles([]); setAccountNames({}); }}
+                        style={styles.clearFilesButton}
+                      >
+                        Clear all
+                      </button>
+                    </div>
                   )}
-                  <button onClick={handleAnalyze}
-                    disabled={!files.length || loading || !selectedPersonId || !allNamed}
-                    style={loading || !files.length || !allNamed ? styles.buttonDisabled : styles.button}>
-                    {loading ? "Analyzing..." : "Analyze Statement"}
-                  </button>
+
+                  <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                    <button onClick={handleAnalyze}
+                      disabled={!files.length || loading || !selectedPersonId || !allNamed}
+                      style={loading || !files.length || !allNamed ? styles.buttonDisabled : styles.button}>
+                      {loading ? "Analyzing..." : "Analyze Statement"}
+                    </button>
+                    {loading && (
+                      <button onClick={handleCancel} style={styles.cancelButton}>
+                        ✕ Cancel
+                      </button>
+                    )}
+                  </div>
                 </>
               )}
               {error && <p style={styles.error}>{error}</p>}
@@ -519,12 +654,26 @@ export default function App() {
 
                 <div style={styles.totalsRow}>
                   {[
-                    { label: "Income", value: result.income, color: "#1a1a2e" },
-                    { label: "Spending", value: result.spending, color: "#e05c5c" },
-                    { label: "Invested", value: result.invested || 0, color: "#9b59b6" },
-                    { label: "Savings", value: result.savings, color: "#2ecc71" },
-                  ].map(({ label, value, color }) => (
-                    <div key={label} style={styles.totalCard}>
+                    { label: "Income", value: result.income, color: "#1a1a2e", filter: "income" },
+                    { label: "Spending", value: result.spending, color: "#e05c5c", filter: "spending" },
+                    { label: "Invested", value: result.invested || 0, color: "#9b59b6", filter: "invested" },
+                    { label: "Savings", value: result.savings, color: "#2ecc71", filter: null },
+                  ].map(({ label, value, color, filter }) => (
+                    <div
+                      key={label}
+                      style={{
+                        ...styles.totalCard,
+                        cursor: filter ? "pointer" : "default",
+                        outline: totalsFilter === filter && filter ? `2px solid ${color}` : "none",
+                        transform: totalsFilter === filter && filter ? "scale(1.03)" : "scale(1)",
+                        transition: "transform 0.15s, outline 0.15s",
+                      }}
+                      onClick={() => {
+                        if (!filter) return;
+                        setTotalsFilter(prev => prev === filter ? null : filter);
+                        setCategoryFilter(null);
+                      }}
+                    >
                       <p style={styles.totalLabel}>{label}</p>
                       <p style={{ ...styles.totalAmount, color }}>${(value || 0).toLocaleString()}</p>
                     </div>
@@ -544,7 +693,10 @@ export default function App() {
                       <XAxis dataKey="name" />
                       <YAxis />
                       <Tooltip formatter={(value) => `$${value.toFixed(2)}`} />
-                      <Bar dataKey="amount" onClick={(data) => setCategoryFilter(prev => prev === data.name ? null : data.name)}>
+                      <Bar dataKey="amount" onClick={(data) => {
+                        setCategoryFilter(prev => prev === data.name ? null : data.name);
+                        setTotalsFilter(null);
+                      }}>
                         {chartData.map((entry) => (
                           <Cell key={entry.name} fill={CATEGORY_COLORS[entry.name] || "#95a5a6"}
                             opacity={categoryFilter && categoryFilter !== entry.name ? 0.3 : 1} />
@@ -557,10 +709,15 @@ export default function App() {
                 <div style={styles.card}>
                   <div style={styles.tableHeader}>
                     <h2 style={styles.cardTitle}>AI Insights</h2>
-                    <button onClick={refreshInsights} disabled={loading} style={styles.clearFilter}>
-                      ↻ Refresh Insights
+                    <button onClick={refreshInsights} disabled={refreshingInsights} style={styles.clearFilter}>
+                      {refreshingInsights ? "↻ Refreshing..." : "↻ Refresh Insights"}
                     </button>
                   </div>
+                  {refreshingInsights && (
+                    <div style={styles.insightsLoadingBar}>
+                      <div style={styles.insightsLoadingFill} />
+                    </div>
+                  )}
                   <p style={styles.summary}>{result.insights?.summary}</p>
                   <div style={styles.insightBox}>
                     <p style={styles.insightLabel}>What you are doing well</p>
@@ -582,30 +739,119 @@ export default function App() {
                 <div style={styles.card}>
                   <div style={styles.tableHeader}>
                     <h2 style={styles.cardTitle}>
-                      {categoryFilter ? `Transactions — ${categoryFilter}` : "All Transactions"}
+                      {categoryFilter
+                        ? `Transactions — ${categoryFilter}`
+                        : totalsFilter
+                          ? `Transactions — ${totalsFilter.charAt(0).toUpperCase() + totalsFilter.slice(1)}`
+                          : "All Transactions"}
                     </h2>
-                    {categoryFilter && (
-                      <button onClick={() => setCategoryFilter(null)} style={styles.clearFilter}>
-                        ✕ Clear filter
+                    {(tableSearch || tableAccountFilter || tableCategoryFilter || tableStatusFilter !== "all" || tableSort.col) && (
+                      <button onClick={() => {
+                        setTableSearch("");
+                        setTableAccountFilter("");
+                        setTableCategoryFilter("");
+                        setTableStatusFilter("all");
+                        setTableSort({ col: null, dir: "asc" });
+                      }} style={styles.clearFilter}>
+                        ↺ Reset table filters
                       </button>
                     )}
                   </div>
                   <table style={styles.table}>
                     <thead>
                       <tr>
-                        <th style={styles.th}>Date</th>
-                        <th style={styles.th}>Description</th>
-                        <th style={styles.th}>Account</th>
-                        <th style={styles.th}>Category</th>
-                        <th style={styles.th}>Amount</th>
+                        <th style={styles.th}>
+                          <div style={styles.thContent}>
+                            Date
+                            <button onClick={() => setTableSort(prev =>
+                              prev.col === "date"
+                                ? { col: "date", dir: prev.dir === "asc" ? "desc" : "asc" }
+                                : { col: "date", dir: "asc" }
+                            )} style={styles.sortButton}>
+                              {tableSort.col === "date" ? (tableSort.dir === "asc" ? "↑" : "↓") : "↕"}
+                            </button>
+                          </div>
+                          <input
+                            type="date"
+                            style={styles.filterInput}
+                            placeholder="Filter date"
+                            onChange={(e) => setTableSearch("")}
+                          />
+                        </th>
+                        <th style={styles.th}>
+                          <div style={styles.thContent}>Description</div>
+                          <input
+                            type="text"
+                            placeholder="Search..."
+                            value={tableSearch}
+                            onChange={(e) => setTableSearch(e.target.value)}
+                            style={styles.filterInput}
+                          />
+                        </th>
+                        <th style={styles.th}>
+                          <div style={styles.thContent}>Account</div>
+                          <select
+                            value={tableAccountFilter}
+                            onChange={(e) => setTableAccountFilter(e.target.value)}
+                            style={styles.filterSelect}
+                          >
+                            <option value="">All</option>
+                            {statementAccounts.map(acc => (
+                              <option key={acc} value={acc}>{acc}</option>
+                            ))}
+                          </select>
+                        </th>
+                        <th style={styles.th}>
+                          <div style={styles.thContent}>Category</div>
+                          <select
+                            value={tableCategoryFilter}
+                            onChange={(e) => setTableCategoryFilter(e.target.value)}
+                            style={styles.filterSelect}
+                          >
+                            <option value="">All</option>
+                            {["Food", "Transport", "Shopping", "Subscriptions", "Utilities",
+                              "Healthcare", "Entertainment", "Income", "Investment", "Other"].map(cat => (
+                                <option key={cat} value={cat}>{cat}</option>
+                              ))}
+                          </select>
+                        </th>
+                        <th style={styles.th}>
+                          <div style={styles.thContent}>
+                            Amount
+                            <button onClick={() => setTableSort(prev =>
+                              prev.col === "amount"
+                                ? { col: "amount", dir: prev.dir === "asc" ? "desc" : "asc" }
+                                : { col: "amount", dir: "desc" }
+                            )} style={styles.sortButton}>
+                              {tableSort.col === "amount" ? (tableSort.dir === "asc" ? "↑" : "↓") : "↕"}
+                            </button>
+                          </div>
+                        </th>
+                        <th style={styles.th}>
+                          <div style={styles.thContent}>Status</div>
+                          <select
+                            value={tableStatusFilter}
+                            onChange={(e) => setTableStatusFilter(e.target.value)}
+                            style={styles.filterSelect}
+                          >
+                            <option value="all">All</option>
+                            <option value="active">Active</option>
+                            <option value="excluded">Excluded</option>
+                          </select>
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
                       {filteredTransactions.map((t, i) => (
-                        <tr key={i} style={i % 2 === 0 ? styles.rowEven : styles.rowOdd}>
+                        <tr key={i} style={{
+                          ...(i % 2 === 0 ? styles.rowEven : styles.rowOdd),
+                          opacity: t.excluded ? 0.4 : 1
+                        }}>
                           <td style={styles.td}>{t.date}</td>
                           <td style={styles.td}>
-                            <div>{t.description}</div>
+                            <div style={{ textDecoration: t.excluded ? "line-through" : "none" }}>
+                              {t.description}
+                            </div>
                             {t.note && t.note !== t.description && (
                               <div style={styles.noteText}>{t.note}</div>
                             )}
@@ -614,16 +860,16 @@ export default function App() {
                             <span style={styles.accountBadge}>{t.account || "Unknown"}</span>
                           </td>
                           <td style={styles.td}>
-                            {editingCategory === i ? (
+                            {editingCategory === t.originalIndex ? (
                               <select
                                 autoFocus
                                 defaultValue={t.category}
-                                onChange={(e) => updateCategory(i, e.target.value)}
+                                onChange={(e) => updateCategory(t.originalIndex, e.target.value)}
                                 onBlur={() => setEditingCategory(null)}
                                 style={styles.categorySelect}
                               >
                                 {["Food", "Transport", "Shopping", "Subscriptions", "Utilities",
-                                  "Healthcare", "Entertainment", "Income", "Other"].map(cat => (
+                                  "Healthcare", "Entertainment", "Income", "Investment", "Other"].map(cat => (
                                     <option key={cat} value={cat}>{cat}</option>
                                   ))}
                               </select>
@@ -634,7 +880,7 @@ export default function App() {
                                   background: CATEGORY_COLORS[t.category] || "#95a5a6",
                                   cursor: "pointer"
                                 }}
-                                onClick={() => setEditingCategory(i)}
+                                onClick={() => setEditingCategory(t.originalIndex)}
                                 title="Click to edit category"
                               >
                                 {t.category} ✎
@@ -647,6 +893,19 @@ export default function App() {
                             fontWeight: "bold"
                           }}>
                             {t.amount < 0 ? "-" : "+"}${Math.abs(t.amount).toFixed(2)}
+                          </td>
+                          <td style={styles.td}>
+                            <button
+                              onClick={() => toggleExcluded(t.originalIndex, t.excluded)}
+                              style={{
+                                ...styles.excludeButton,
+                                background: t.auto_excluded ? "#f0a500" : t.excluded ? "#e05c5c" : "#f0f4f8",
+                                color: t.auto_excluded || t.excluded ? "white" : "#888",
+                              }}
+                              title={t.excluded ? "Click to include" : "Click to exclude"}
+                            >
+                              {t.auto_excluded ? "Auto-excluded" : t.excluded ? "Excluded" : "Exclude"}
+                            </button>
                           </td>
                         </tr>
                       ))}
@@ -698,13 +957,20 @@ export default function App() {
 
                 <h3 style={styles.chartSubtitle}>Savings Rate Over Time</h3>
                 <ResponsiveContainer width="100%" height={250}>
-                  <LineChart data={trendsData.map(d => ({ ...d, month: formatMonthShort(d.month) }))}>
+                  <LineChart data={trendsData.map((d, i) => ({
+                    ...d,
+                    month: formatMonthShort(d.month),
+                    rolling_avg: rollingAverages[i]?.avg_savings_rate
+                  }))}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="month" />
                     <YAxis unit="%" />
                     <Tooltip formatter={(value) => `${value}%`} />
-                    <Line type="monotone" dataKey="savings_rate" name="Savings Rate"
+                    <Legend />
+                    <Line type="monotone" dataKey="savings_rate" name="Monthly Rate"
                       stroke="#2ecc71" strokeWidth={2} dot={{ r: 5 }} />
+                    <Line type="monotone" dataKey="rolling_avg" name="3 Month Avg"
+                      stroke="#4f86c6" strokeWidth={2} strokeDasharray="5 5" dot={false} />
                   </LineChart>
                 </ResponsiveContainer>
 
@@ -717,6 +983,7 @@ export default function App() {
                       <th style={styles.th}>Spending</th>
                       <th style={styles.th}>Savings</th>
                       <th style={styles.th}>Rate</th>
+                      <th style={styles.th}>3 Month Avg Rate</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -727,6 +994,9 @@ export default function App() {
                         <td style={{ ...styles.td, color: "#e05c5c", fontWeight: "bold" }}>${d.spending.toLocaleString()}</td>
                         <td style={{ ...styles.td, color: d.savings > 0 ? "#2ecc71" : "#e05c5c", fontWeight: "bold" }}>${d.savings.toLocaleString()}</td>
                         <td style={{ ...styles.td, color: "#4f86c6", fontWeight: "bold" }}>{d.savings_rate}%</td>
+                        <td style={{ ...styles.td, color: "#9b59b6", fontWeight: "bold" }}>
+                          {rollingAverages[i]?.avg_savings_rate !== undefined ? `${rollingAverages[i].avg_savings_rate}%` : "—"}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -763,7 +1033,6 @@ export default function App() {
 
             {householdData && householdData.people.length > 0 ? (
               <>
-                {/* Combined totals */}
                 <div style={styles.card}>
                   <h2 style={styles.cardTitle}>Combined Household — {formatMonth(householdData.month)}</h2>
                   <div style={styles.totalsRow}>
@@ -784,7 +1053,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Per person breakdown */}
                 <div style={styles.householdGrid}>
                   {householdData.people.map((person, idx) => {
                     const color = PERSON_COLORS[idx % PERSON_COLORS.length];
@@ -901,6 +1169,9 @@ const styles = {
   fileName: { color: "#555", fontSize: 14, marginBottom: 12 },
   button: { background: "#4f86c6", color: "white", border: "none", padding: "12px 28px", borderRadius: 8, fontSize: 16, cursor: "pointer", fontWeight: "bold" },
   buttonDisabled: { background: "#ccc", color: "white", border: "none", padding: "12px 28px", borderRadius: 8, fontSize: 16, cursor: "not-allowed", fontWeight: "bold" },
+  cancelButton: { background: "none", border: "1px solid #e05c5c", color: "#e05c5c", borderRadius: 8, padding: "12px 20px", cursor: "pointer", fontSize: 14, fontWeight: "bold" },
+  removeFileButton: { background: "none", border: "none", color: "#e05c5c", cursor: "pointer", fontSize: 14, padding: "0 4px", fontWeight: "bold" },
+  clearFilesButton: { background: "none", border: "1px solid #ddd", borderRadius: 6, padding: "4px 12px", cursor: "pointer", fontSize: 12, color: "#888", marginTop: 4 },
   noPeopleMsg: { color: "#888", fontSize: 14 },
   error: { color: "#e05c5c", marginTop: 12 },
   resultLabelRow: { marginBottom: 16 },
@@ -930,7 +1201,13 @@ const styles = {
   accountBadge: { background: "#f0f4f8", color: "#555", padding: "2px 8px", borderRadius: 12, fontSize: 12, fontWeight: "bold", border: "1px solid #ddd" },
   categoryBadge: { color: "white", padding: "2px 8px", borderRadius: 12, fontSize: 12, fontWeight: "bold" },
   noTransactions: { color: "#888", fontSize: 14, textAlign: "center", padding: 20 },
-  requiredHint: { color: "#e05c5c", fontSize: 13, marginBottom: 8 },
   noteText: { fontSize: 11, color: "#aaa", marginTop: 2 },
+  thContent: { display: "flex", alignItems: "center", gap: 4, marginBottom: 6 },
+  sortButton: { background: "none", border: "none", cursor: "pointer", fontSize: 12, color: "#4f86c6", padding: 0 },
+  filterInput: { width: "100%", padding: "4px 6px", borderRadius: 4, border: "1px solid #ddd", fontSize: 12, boxSizing: "border-box" },
+  filterSelect: { width: "100%", padding: "4px 6px", borderRadius: 4, border: "1px solid #ddd", fontSize: 12, background: "white", boxSizing: "border-box" },
+  excludeButton: { fontSize: 11, padding: "2px 8px", borderRadius: 10, border: "none", cursor: "pointer", fontWeight: "bold" },
   categorySelect: { fontSize: 12, padding: "2px 4px", borderRadius: 4, border: "1px solid #ddd" },
+  insightsLoadingBar: { height: 3, background: "#f0f4f8", borderRadius: 2, marginBottom: 16, overflow: "hidden" },
+  insightsLoadingFill: { height: "100%", width: "40%", background: "#4f86c6", borderRadius: 2, animation: "slidingBar 1.2s ease-in-out infinite" },
 };
