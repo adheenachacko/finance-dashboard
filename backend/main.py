@@ -210,8 +210,12 @@ Return a JSON array with this exact structure, nothing else:
   {{"index": 0, "category": "Food"}}
 ]
 
-Category must be one of exactly these: Food, Transport, Shopping, Subscriptions, Utilities, Healthcare, Entertainment, Income, Investment, Other
+Category must be one of exactly these: Food, Transport, Shopping, Subscriptions, Utilities, Healthcare, Entertainment, Income, Investment, Housing, Travel, Other
+
 Rules:
+- Rent payments, mortgage payments, and housing-related expenses should be categorized as Housing
+- Flights, hotels, Airbnb = Travel
+- Uber, Lyft, gas, parking = Transport
 - Positive amounts are money received — if someone paid you back for food, still categorize as Food
 - Negative amounts are money sent
 - Use the note to determine category
@@ -222,6 +226,7 @@ Rules:
 - If unclear = Other
 - Return only valid JSON array, no other text
 - Transfers to investment accounts like Vanguard, Fidelity, Schwab = Investment
+
 
 Transactions:
 {json.dumps(tx_list, indent=2)}"""
@@ -267,16 +272,24 @@ Return a JSON object with this exact structure, nothing else:
 
 Rules:
 - amount is negative for spending, positive for income/deposits
-- category must be one of exactly these: Food, Transport, Shopping, Subscriptions, Utilities, Healthcare, Entertainment, Income, Investment, Other
+- category must be one of exactly these: Food, Transport, Shopping, Subscriptions, Utilities, Healthcare, Entertainment, Income, Investment, Housing, Travel, Other
+- Flights, hotels, Airbnb, vacation rentals, and travel-related bookings should be categorized as Travel
+- Local transport like Uber, Lyft, subway, PATH, parking = Transport
+- Travel is for trips and accommodation, Transport is for daily commuting
+- Rent payments, mortgage payments, and housing-related expenses should be categorized as Housing
 - date format must be YYYY-MM-DD
 - Ignore payment coupons, legal text, interest calculations, and notices
 - Only extract actual purchase transactions and payments
 - Return only valid JSON, absolutely no other text
 - Any transfer to Vanguard, Fidelity, Schwab, Robinhood, or similar investment platforms should be categorized as Investment
-- category must be one of exactly these: Food, Transport, Shopping, Subscriptions, Utilities, Healthcare, Entertainment, Income, Investment, Transfer, Other
-- Credit card payments (e.g. "AMEX PAYMENT", "CHASE PAYMENT", "CITI PAYMENT") should be categorized as Transfer
-- Internal transfers between your own accounts should be categorized as Transfer
+- category must be one of exactly these: Food, Transport, Shopping, Subscriptions, Utilities, Healthcare, Entertainment, Income, Investment, Other
 - Transfers to investment accounts like Vanguard, Fidelity, Schwab = Investment
+- Credits, refunds, and statement credits shown in the Credits section should have POSITIVE amounts (money back to you)
+- Platinum Digital Entertainment Credit, Platinum Resy Credit, Platinum Walmart+ Credit are statement credits — positive amounts, categorize based on what they're for (Entertainment, Food, Subscriptions)
+- Any line in a Credits section with a negative sign in the PDF should be treated as positive in your output since it represents money returned
+- Refunds from merchants should be positive amounts
+- New Charges are negative amounts (money spent)
+- Credits/Payments/Refunds are positive amounts (money returned or credited)
 
 
 Statement:
@@ -292,6 +305,45 @@ Statement:
             raw = raw[4:]
     raw = raw.strip()
     return json.loads(raw)
+
+def calculate_totals(transactions):
+    active = [t for t in transactions if not t.get("excluded", False)]
+    
+    income = sum(t["amount"] for t in active
+                 if t["amount"] > 0
+                 and t.get("category") not in ["Investment"])
+    spending = sum(t["amount"] for t in active
+                   if t["amount"] < 0
+                   and t.get("category") not in ["Investment"])
+    invested = sum(abs(t["amount"]) for t in active
+                   if t.get("category") == "Investment"
+                   and t["amount"] < 0)
+    savings = income + spending
+    total_income = income + invested
+    savings_rate = round((savings + invested) / total_income * 100, 1) if total_income > 0 else 0
+
+    categories = {}
+    for t in active:
+        if t.get("category") not in ["Investment"]:
+            cat = t["category"]
+            if t["amount"] < 0:
+                categories[cat] = categories.get(cat, 0) + abs(t["amount"])
+            elif t["amount"] > 0 and cat not in ["Income"]:
+                # Credit/refund — subtract from category spending
+                categories[cat] = categories.get(cat, 0) - t["amount"]
+
+    # Remove categories with zero or negative totals
+    categories = {k: round(v, 2) for k, v in categories.items() if v > 0}
+
+    return {
+        "income": round(income, 2),
+        "spending": round(abs(spending), 2),
+        "savings": round(savings, 2),
+        "invested": round(invested, 2),
+        "total_saved": round(savings + invested, 2),
+        "savings_rate": savings_rate,
+        "categories": {k: round(v, 2) for k, v in categories.items()}
+    }
 
 def auto_exclude_matching_returns(transactions):
     from collections import defaultdict
@@ -331,20 +383,29 @@ def generate_insights(transactions):
     
     income = sum(t["amount"] for t in active 
              if t["amount"] > 0 
-             and t.get("category") not in ["Investment", "Transfer"])
+             and t.get("category") not in ["Investment"])
 
     spending = sum(t["amount"] for t in active 
                if t["amount"] < 0 
-               and t.get("category") not in ["Investment", "Transfer"])
-    invested = sum(abs(t["amount"]) for t in active if t.get("category") == "Investment")
+               and t.get("category") not in ["Investment"])
+    invested = sum(abs(t["amount"]) for t in active 
+               if t.get("category") == "Investment" 
+               and t["amount"] < 0)
     savings = income + spending
     total_saved = savings + invested
 
-    categories = {}
+    ccategories = {}
     for t in active:
-        if t["amount"] < 0 and t.get("category") not in ["Investment"]:
+        if t.get("category") not in ["Investment"]:
             cat = t["category"]
-            categories[cat] = categories.get(cat, 0) + abs(t["amount"])
+            if t["amount"] < 0:
+                categories[cat] = categories.get(cat, 0) + abs(t["amount"])
+            elif t["amount"] > 0 and cat not in ["Income"]:
+                # Credit/refund — subtract from category spending
+                categories[cat] = categories.get(cat, 0) - t["amount"]
+
+    # Remove categories with zero or negative totals
+    categories = {k: round(v, 2) for k, v in categories.items() if v > 0}
 
     total_income = income + invested
     savings_rate = round((total_saved / total_income * 100), 1) if total_income > 0 else 0
@@ -421,7 +482,7 @@ async def analyze(
 
         all_transactions = categorize_venmo_transactions(all_transactions)
 
-        new_transactions, auto_excluded_count = auto_exclude_matching_returns(new_transactions)
+        all_transactions, auto_excluded_count = auto_exclude_matching_returns(all_transactions)
         if auto_excluded_count > 0:
             print(f"Auto-excluded {auto_excluded_count} matching return pairs")
 
@@ -455,7 +516,9 @@ async def analyze(
                         seen.add(key)
                         merged.append(t)
 
-                month_result = generate_insights(merged)
+                month_result = calculate_totals(merged)
+                month_result["insights"] = None
+                month_result["transactions"] = merged
                 month_result["transactions"] = merged
 
                 existing_accounts = existing.totals.get("accounts", [])
@@ -482,7 +545,8 @@ async def analyze(
                 month_result["accounts"] = existing_accounts
 
             else:
-                month_result = generate_insights(month_transactions)
+                month_result = calculate_totals(month_transactions)
+                month_result["insights"] = None
                 month_result["transactions"] = month_transactions
 
                 statement = Statement(
@@ -553,7 +617,8 @@ async def analyze(
                 seen.add(key)
                 merged_transactions.append(t)
 
-        result = generate_insights(merged_transactions)
+        result = calculate_totals(merged_transactions)
+        result["insights"] = None
         result["transactions"] = merged_transactions
 
         existing_accounts = existing.totals.get("accounts", [])
@@ -583,7 +648,8 @@ async def analyze(
         return result
 
     else:
-        result = generate_insights(new_transactions)
+        result = calculate_totals(new_transactions)
+        result["insights"] = None
         result["transactions"] = new_transactions
 
         statement = Statement(
@@ -774,30 +840,38 @@ async def update_transaction(
 
     statement.transactions = transactions
 
-    # Recalculate totals excluding excluded and investment transactions
-    income = sum(t["amount"] for t in active 
-             if t["amount"] > 0 
-             and t.get("category") not in ["Investment", "Transfer"])
+    # Active = not excluded
+    active = [t for t in transactions if not t.get("excluded", False)]
 
-    spending = sum(t["amount"] for t in active 
-               if t["amount"] < 0 
-               and t.get("category") not in ["Investment", "Transfer"])
-    
-    invested = sum(abs(t["amount"]) for t in transactions 
-                   if t.get("category") == "Investment"
-                   and not t.get("excluded", False))
-    
+    # Recalculate totals
+    income = sum(t["amount"] for t in active
+                 if t["amount"] > 0
+                 and t.get("category") not in ["Investment"])
+
+    spending = sum(t["amount"] for t in active
+                   if t["amount"] < 0
+                   and t.get("category") not in ["Investment"])
+
+    invested = sum(abs(t["amount"]) for t in active
+               if t.get("category") == "Investment"
+               and t["amount"] < 0)
+
     savings = income + spending
     total_income = income + invested
     savings_rate = round((savings + invested) / total_income * 100, 1) if total_income > 0 else 0
 
     categories = {}
-    for t in transactions:
-        if (t["amount"] < 0 
-            and t.get("category") not in ["Investment"]
-            and not t.get("excluded", False)):
+    for t in active:
+        if t.get("category") not in ["Investment"]:
             cat = t["category"]
-            categories[cat] = categories.get(cat, 0) + abs(t["amount"])
+            if t["amount"] < 0:
+                categories[cat] = categories.get(cat, 0) + abs(t["amount"])
+            elif t["amount"] > 0 and cat not in ["Income"]:
+                # Credit/refund — subtract from category spending
+                categories[cat] = categories.get(cat, 0) - t["amount"]
+
+    # Remove categories with zero or negative totals
+    categories = {k: round(v, 2) for k, v in categories.items() if v > 0}
 
     totals = dict(statement.totals)
     totals.update({
@@ -817,6 +891,7 @@ async def update_transaction(
     db.refresh(statement)
 
     return {"message": "Updated", "transactions": transactions, "totals": statement.totals}
+
 @app.post("/statements/{statement_id}/refresh-insights")
 async def refresh_insights(
     statement_id: int,
@@ -850,6 +925,57 @@ async def refresh_insights(
         "insights": statement.insights,
         "totals": statement.totals
     }
+
+@app.get("/household-trends")
+async def get_household_trends(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    people = db.query(Person).filter(
+        Person.user_id == current_user.id
+    ).all()
+
+    # Get all months that have data
+    all_months = set()
+    for person in people:
+        statements = db.query(Statement).filter(
+            Statement.person_id == person.id
+        ).all()
+        for s in statements:
+            all_months.add(s.month)
+
+    all_months = sorted(all_months)
+    result = []
+
+    for month in all_months:
+        month_data = {"month": month, "income": 0, "spending": 0, "savings": 0, "invested": 0}
+        for person in people:
+            statement = db.query(Statement).filter(
+                Statement.person_id == person.id,
+                Statement.month == month
+            ).first()
+            if statement:
+                month_data["income"] += statement.totals.get("income", 0)
+                month_data["spending"] += statement.totals.get("spending", 0)
+                month_data["savings"] += statement.totals.get("savings", 0)
+                month_data["invested"] += statement.totals.get("invested", 0)
+
+        month_data["savings_rate"] = round(
+            (month_data["savings"] + month_data["invested"]) /
+            (month_data["income"] + month_data["invested"]) * 100, 1
+        ) if (month_data["income"] + month_data["invested"]) > 0 else 0
+
+        result.append(month_data)
+
+    # Calculate rolling 3 month averages
+    for i, d in enumerate(result):
+        window = result[max(0, i - 2): i + 1]
+        d["rolling_income"] = round(sum(x["income"] for x in window) / len(window), 2)
+        d["rolling_spending"] = round(sum(x["spending"] for x in window) / len(window), 2)
+        d["rolling_savings"] = round(sum(x["savings"] for x in window) / len(window), 2)
+        d["rolling_savings_rate"] = round(sum(x["savings_rate"] for x in window) / len(window), 1)
+
+    return result
 
 
 @app.get("/health")
