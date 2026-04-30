@@ -154,6 +154,16 @@ export default function App() {
   const [loadingMessage, setLoadingMessage] = useState("");
   const abortControllerRef = useRef(null);
   const [householdTrends, setHouseholdTrends] = useState([]);
+  const [householdYear, setHouseholdYear] = useState(null);
+  const [yearTransactions, setYearTransactions] = useState([]);
+  const [yearCategoryFilter, setYearCategoryFilter] = useState(null);
+  const [yearTableSearch, setYearTableSearch] = useState("");
+  const [yearPersonFilter, setYearPersonFilter] = useState("");
+  const [yearAccountFilter, setYearAccountFilter] = useState("");
+  const [yearTableCategoryFilter, setYearTableCategoryFilter] = useState("");
+  const [yearStatusFilter, setYearStatusFilter] = useState("all");
+  const [yearSort, setYearSort] = useState({ col: null, dir: "asc" });
+  const [yearEditingCategory, setYearEditingCategory] = useState(null);
 
   useEffect(() => {
     const token = getToken();
@@ -223,6 +233,95 @@ export default function App() {
       const data = await response.json();
       if (Array.isArray(data)) setHouseholdTrends(data);
     } catch { console.log("Could not fetch household trends"); }
+  };
+
+  const fetchHouseholdYear = async (year) => {
+    try {
+      const response = await fetch(`${API}/household-year/${year}`, { headers: authHeaders() });
+      const data = await response.json();
+      setHouseholdYear(data);
+      fetchYearTransactions(year);
+    } catch { console.log("Could not fetch household year"); }
+  };
+
+  const fetchYearTransactions = async (year) => {
+    try {
+      const response = await fetch(
+        `${API}/household-year/${year}/transactions`,
+        { headers: authHeaders() }
+      );
+      const data = await response.json();
+      if (Array.isArray(data)) setYearTransactions(data);
+    } catch { console.log("Could not fetch year transactions"); }
+  };
+
+  const toggleYearTransactionExcluded = async (statementId, originalIndex, currentExcluded) => {
+    try {
+      const formData = new FormData();
+      formData.append("excluded", (!currentExcluded).toString());
+      const response = await fetch(
+        `${API}/statements/${statementId}/transaction/${originalIndex}`,
+        { method: "PATCH", headers: authHeaders(), body: formData }
+      );
+      const data = await response.json();
+
+      // Update year transactions locally
+      setYearTransactions(prev => prev.map(t =>
+        t.statement_id === statementId && t.original_index === originalIndex
+          ? { ...t, excluded: !currentExcluded }
+          : t
+      ));
+
+      // Also refresh household year totals
+      if (householdMonth?.startsWith("year-")) {
+        fetchHouseholdYear(householdMonth.replace("year-", ""));
+      }
+
+      // If this statement is currently loaded in the statement tab, update it too
+      if (result?.id === statementId) {
+        setResult(prev => ({
+          ...prev,
+          ...data.totals,
+          transactions: data.transactions,
+          categories: data.totals.categories
+        }));
+      }
+    } catch { console.log("Could not toggle transaction"); }
+  };
+
+  const updateYearTransactionCategory = async (statementId, originalIndex, newCategory) => {
+    try {
+      const formData = new FormData();
+      formData.append("category", newCategory);
+      const response = await fetch(
+        `${API}/statements/${statementId}/transaction/${originalIndex}`,
+        { method: "PATCH", headers: authHeaders(), body: formData }
+      );
+      const data = await response.json();
+
+      // Update year transactions locally
+      setYearTransactions(prev => prev.map(t =>
+        t.statement_id === statementId && t.original_index === originalIndex
+          ? { ...t, category: newCategory }
+          : t
+      ));
+
+      // Refresh year totals
+      if (householdMonth?.startsWith("year-")) {
+        fetchHouseholdYear(householdMonth.replace("year-", ""));
+      }
+
+      // If this statement is loaded in statement tab, update it too
+      if (result?.id === statementId) {
+        setResult(prev => ({
+          ...prev,
+          transactions: data.transactions,
+          categories: data.totals.categories
+        }));
+      }
+
+      setYearEditingCategory(null);
+    } catch { console.log("Could not update category"); }
   };
 
   const addPerson = async () => {
@@ -938,23 +1037,28 @@ export default function App() {
                       </td>
                       <td style={styles.td}>
                         {editingCategory === t.originalIndex ? (
-                          <select autoFocus defaultValue={t.category}
+                          <select
+                            autoFocus
+                            defaultValue={t.category}
                             onChange={(e) => updateCategory(t.originalIndex, e.target.value)}
                             onBlur={() => setEditingCategory(null)}
-                            style={styles.categorySelect}>
+                            style={styles.categorySelect}
+                          >
                             {["Food", "Transport", "Shopping", "Subscriptions", "Utilities",
                               "Healthcare", "Entertainment", "Income", "Investment", "Housing", "Travel", "Other"].map(cat => (
                                 <option key={cat} value={cat}>{cat}</option>
                               ))}
                           </select>
                         ) : (
-                          <span style={{
-                            ...styles.categoryBadge,
-                            background: CATEGORY_COLORS[t.category] || "#95a5a6",
-                            cursor: "pointer"
-                          }}
+                          <span
+                            style={{
+                              ...styles.categoryBadge,
+                              background: CATEGORY_COLORS[t.category] || "#95a5a6",
+                              cursor: "pointer"
+                            }}
                             onClick={() => setEditingCategory(t.originalIndex)}
-                            title="Click to edit category">
+                            title="Click to edit category"
+                          >
                             {t.category} ✎
                           </span>
                         )}
@@ -985,6 +1089,12 @@ export default function App() {
               {filteredTransactions.length === 0 && <p style={styles.noTransactions}>No transactions found.</p>}
             </div>
           </>
+        )}
+
+        {activeTab === "statement" && !result && (
+          <div style={styles.card}>
+            <p style={styles.noPeopleMsg}>Click a month in the sidebar to load a statement.</p>
+          </div>
         )}
 
         {activeTab === "statement" && !result && (
@@ -1090,13 +1200,19 @@ export default function App() {
                       setHouseholdMonth(val);
                       if (val === "rolling") {
                         fetchHouseholdTrends();
+                      } else if (val === "year-2026") {
+                        fetchHouseholdYear("2026");
+                      } else if (val === "year-2025") {
+                        fetchHouseholdYear("2025");
                       } else if (val) {
                         fetchHousehold(val);
                       }
                     }}
                     style={styles.pillSelect}
                   >
-                    <option value="">Select a month</option>
+                    <option value="">Select a view</option>
+                    <option value="year-2026">📅 2026 Annual Summary</option>
+                    <option value="year-2025">📅 2025 Annual Summary</option>
                     <option value="rolling">📊 3 Month Rolling Average</option>
                     {availableMonths.map(m => (
                       <option key={m} value={m}>{formatMonth(m)}</option>
@@ -1112,7 +1228,6 @@ export default function App() {
                 <div style={styles.card}>
                   <h2 style={styles.cardTitle}>3 Month Rolling Average — Household</h2>
                   <p style={styles.chartHint}>Each month shows the average of that month and the two preceding months</p>
-
                   {(() => {
                     const latest = householdTrends[householdTrends.length - 1];
                     return (
@@ -1194,8 +1309,338 @@ export default function App() {
               </>
             )}
 
+            {/* Year view */}
+            {householdMonth?.startsWith("year-") && householdYear && (
+              <>
+                <div style={styles.card}>
+                  <h2 style={styles.cardTitle}>
+                    {householdYear.year} Annual Summary — Household
+                  </h2>
+                  <p style={{ color: "#888", fontSize: 13, marginBottom: 20 }}>
+                    Based on {householdYear.months_tracked} month{householdYear.months_tracked !== 1 ? "s" : ""} of data
+                  </p>
+
+                  <div style={styles.totalsRow}>
+                    {[
+                      { label: "Total Income", value: householdYear.total_income, color: "#1a1a2e" },
+                      { label: "Total Spending", value: householdYear.total_spending, color: "#e05c5c" },
+                      { label: "Total Invested", value: householdYear.total_invested, color: "#9b59b6" },
+                      { label: "Total Saved", value: householdYear.total_savings, color: "#2ecc71" },
+                    ].map(({ label, value, color }) => (
+                      <div key={label} style={styles.totalCard}>
+                        <p style={styles.totalLabel}>{label}</p>
+                        <p style={{ ...styles.totalAmount, color }}>${Math.round(value).toLocaleString()}</p>
+                      </div>
+                    ))}
+                    <div style={styles.totalCard}>
+                      <p style={styles.totalLabel}>Savings Rate</p>
+                      <p style={{ ...styles.totalAmount, color: "#4f86c6" }}>{householdYear.savings_rate}%</p>
+                    </div>
+                  </div>
+
+                  <div style={{
+                    background: "linear-gradient(135deg, #1a1a2e 0%, #4f86c6 100%)",
+                    borderRadius: 16,
+                    padding: 24,
+                    textAlign: "center",
+                    marginBottom: 20,
+                    color: "white"
+                  }}>
+                    <p style={{ margin: "0 0 8px 0", fontSize: 13, opacity: 0.8, textTransform: "uppercase", letterSpacing: "1px" }}>
+                      Average Monthly Savings
+                    </p>
+                    <p style={{ margin: 0, fontSize: 36, fontWeight: "800" }}>
+                      ${Math.round(householdYear.avg_monthly_savings).toLocaleString()}
+                    </p>
+                    <p style={{ margin: "8px 0 0 0", fontSize: 12, opacity: 0.7 }}>
+                      per month across {householdYear.months_tracked} months tracked
+                    </p>
+                  </div>
+                </div>
+
+                <div style={styles.householdGrid}>
+                  {householdYear.by_person.map((person, idx) => {
+                    const color = PERSON_COLORS[idx % PERSON_COLORS.length];
+                    return (
+                      <div key={person.person_name} style={styles.card}>
+                        <h2 style={{ ...styles.cardTitle, color }}>{person.person_name}</h2>
+                        <p style={{ color: "#aaa", fontSize: 12, marginBottom: 16 }}>
+                          {person.months} months tracked
+                        </p>
+                        <div style={styles.personTotalsRow}>
+                          <div style={styles.personTotalCard}>
+                            <p style={styles.totalLabel}>Income</p>
+                            <p style={{ ...styles.personTotalAmount, color }}>${Math.round(person.income).toLocaleString()}</p>
+                          </div>
+                          <div style={styles.personTotalCard}>
+                            <p style={styles.totalLabel}>Spending</p>
+                            <p style={{ ...styles.personTotalAmount, color: "#e05c5c" }}>${Math.round(person.spending).toLocaleString()}</p>
+                          </div>
+                          <div style={styles.personTotalCard}>
+                            <p style={styles.totalLabel}>Saved</p>
+                            <p style={{ ...styles.personTotalAmount, color: "#2ecc71" }}>${Math.round(person.savings).toLocaleString()}</p>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div style={styles.card}>
+                  <h2 style={styles.cardTitle}>Spending by Category — {householdYear.year}</h2>
+                  <ResponsiveContainer width="100%" height={300}>
+                    <BarChart
+                      data={Object.entries(householdYear.by_category).map(([name, value]) => ({ name, amount: Math.round(value) }))}
+                      style={{ cursor: "pointer" }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="name" />
+                      <YAxis />
+                      <Tooltip formatter={(value) => `$${value.toLocaleString()}`} />
+                      <Bar dataKey="amount" onClick={(data) => setYearCategoryFilter(prev => prev === data.name ? null : data.name)}>
+                        {Object.entries(householdYear.by_category).map(([name]) => (
+                          <Cell key={name}
+                            fill={CATEGORY_COLORS[name] || "#95a5a6"}
+                            opacity={yearCategoryFilter && yearCategoryFilter !== name ? 0.3 : 1}
+                          />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+
+                  <table style={{ ...styles.table, marginTop: 20 }}>
+                    <thead>
+                      <tr>
+                        <th style={styles.th}>Category</th>
+                        <th style={styles.th}>Total Spent</th>
+                        <th style={styles.th}>Monthly Avg</th>
+                        <th style={styles.th}>% of Spending</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(householdYear.by_category).map(([cat, amt], i) => (
+                        <tr key={cat} style={i % 2 === 0 ? styles.rowEven : styles.rowOdd}>
+                          <td style={styles.td}>
+                            <span style={{ ...styles.categoryBadge, background: CATEGORY_COLORS[cat] || "#95a5a6" }}>{cat}</span>
+                          </td>
+                          <td style={{ ...styles.td, fontWeight: "bold" }}>${Math.round(amt).toLocaleString()}</td>
+                          <td style={{ ...styles.td, color: "#888" }}>
+                            ${Math.round(amt / (householdYear.months_tracked || 1)).toLocaleString()}
+                          </td>
+                          <td style={{ ...styles.td, color: "#4f86c6", fontWeight: "bold" }}>
+                            {householdYear.total_spending > 0 ? Math.round(amt / householdYear.total_spending * 100) : 0}%
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Year transactions table */}
+                <div style={styles.card}>
+                  <div style={styles.tableHeader}>
+                    <h2 style={styles.cardTitle}>
+                      {yearCategoryFilter ? `Transactions — ${yearCategoryFilter}` : "All Transactions"}
+                    </h2>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      {yearCategoryFilter && (
+                        <button onClick={() => setYearCategoryFilter(null)} style={styles.clearFilter}>
+                          ✕ Clear filter
+                        </button>
+                      )}
+                      {(yearTableSearch || yearPersonFilter || yearAccountFilter || yearStatusFilter !== "all" || yearSort.col) && (
+                        <button onClick={() => {
+                          setYearTableSearch("");
+                          setYearPersonFilter("");
+                          setYearAccountFilter("");
+                          setYearStatusFilter("all");
+                          setYearSort({ col: null, dir: "asc" });
+                        }} style={styles.clearFilter}>
+                          ↺ Reset filters
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <table style={styles.table}>
+                    <thead>
+                      <tr>
+                        <th style={styles.th}>
+                          <div style={styles.thContent}>
+                            Date
+                            <button onClick={() => setYearSort(prev =>
+                              prev.col === "date"
+                                ? { col: "date", dir: prev.dir === "asc" ? "desc" : "asc" }
+                                : { col: "date", dir: "desc" }
+                            )} style={styles.sortButton}>
+                              {yearSort.col === "date" ? (yearSort.dir === "asc" ? "↑" : "↓") : "↕"}
+                            </button>
+                          </div>
+                        </th>
+                        <th style={styles.th}>
+                          <div style={styles.thContent}>Person</div>
+                          <select value={yearPersonFilter} onChange={(e) => setYearPersonFilter(e.target.value)} style={styles.filterSelect}>
+                            <option value="">All</option>
+                            {people.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
+                          </select>
+                        </th>
+                        <th style={styles.th}>
+                          <div style={styles.thContent}>Description</div>
+                          <input type="text" placeholder="Search..." value={yearTableSearch}
+                            onChange={(e) => setYearTableSearch(e.target.value)} style={styles.filterInput} />
+                        </th>
+                        <th style={styles.th}>
+                          <div style={styles.thContent}>Account</div>
+                          <select value={yearAccountFilter} onChange={(e) => setYearAccountFilter(e.target.value)} style={styles.filterSelect}>
+                            <option value="">All</option>
+                            {[...new Set(yearTransactions.map(t => t.account).filter(Boolean))].map(acc => (
+                              <option key={acc} value={acc}>{acc}</option>
+                            ))}
+                          </select>
+                        </th>
+                        <th style={styles.th}>
+                          <div style={styles.thContent}>Category</div>
+                          <select value={yearTableCategoryFilter} onChange={(e) => setYearTableCategoryFilter(e.target.value)} style={styles.filterSelect}>
+                            <option value="">All</option>
+                            {["Food", "Transport", "Shopping", "Subscriptions", "Utilities",
+                              "Healthcare", "Entertainment", "Income", "Investment", "Housing", "Travel", "Other"].map(cat => (
+                                <option key={cat} value={cat}>{cat}</option>
+                              ))}
+                          </select>
+                        </th>
+                        <th style={styles.th}>
+                          <div style={styles.thContent}>
+                            Amount
+                            <button onClick={() => setYearSort(prev =>
+                              prev.col === "amount"
+                                ? { col: "amount", dir: prev.dir === "asc" ? "desc" : "asc" }
+                                : { col: "amount", dir: "desc" }
+                            )} style={styles.sortButton}>
+                              {yearSort.col === "amount" ? (yearSort.dir === "asc" ? "↑" : "↓") : "↕"}
+                            </button>
+                          </div>
+                        </th>
+                        <th style={styles.th}>
+                          <div style={styles.thContent}>Status</div>
+                          <select value={yearStatusFilter} onChange={(e) => setYearStatusFilter(e.target.value)} style={styles.filterSelect}>
+                            <option value="all">All</option>
+                            <option value="active">Active</option>
+                            <option value="excluded">Excluded</option>
+                          </select>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(() => {
+                        let txs = yearTransactions
+                          .filter(t => yearCategoryFilter ? t.category === yearCategoryFilter : true)
+                          .filter(t => yearTableSearch ? t.description?.toLowerCase().includes(yearTableSearch.toLowerCase()) : true)
+                          .filter(t => yearPersonFilter ? t.person_name === yearPersonFilter : true)
+                          .filter(t => yearAccountFilter ? t.account === yearAccountFilter : true)
+                          .filter(t => yearTableCategoryFilter ? t.category === yearTableCategoryFilter : true)
+                          .filter(t => yearStatusFilter === "active" ? !t.excluded : yearStatusFilter === "excluded" ? t.excluded : true);
+
+                        if (yearSort.col === "date") {
+                          txs = [...txs].sort((a, b) =>
+                            yearSort.dir === "asc" ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date)
+                          );
+                        } else if (yearSort.col === "amount") {
+                          txs = [...txs].sort((a, b) =>
+                            yearSort.dir === "asc" ? a.amount - b.amount : b.amount - a.amount
+                          );
+                        }
+
+                        return txs.map((t, i) => (
+                          <tr key={i} style={{
+                            ...(i % 2 === 0 ? styles.rowEven : styles.rowOdd),
+                            opacity: t.excluded ? 0.4 : 1
+                          }}>
+                            <td style={styles.td}>{t.date}</td>
+                            <td style={styles.td}>
+                              <span style={{
+                                ...styles.accountBadge,
+                                background: t.person_name === people[0]?.name ? "#e8f0fe" : "#fce8f0",
+                                color: t.person_name === people[0]?.name ? "#4f86c6" : "#e05c5c",
+                                border: "none"
+                              }}>
+                                {t.person_name}
+                              </span>
+                            </td>
+                            <td style={styles.td}>
+                              <div style={{ textDecoration: t.excluded ? "line-through" : "none" }}>
+                                {t.description}
+                              </div>
+                              {t.note && t.note !== t.description && (
+                                <div style={styles.noteText}>{t.note}</div>
+                              )}
+                            </td>
+                            <td style={styles.td}>
+                              <span style={styles.accountBadge}>{t.account || "Unknown"}</span>
+                            </td>
+                            <td style={styles.td}>
+                              {yearEditingCategory === String(t.statement_id) + "-" + String(t.original_index) ? (
+                                <select
+                                  autoFocus
+                                  defaultValue={t.category}
+                                  onChange={(e) => updateYearTransactionCategory(t.statement_id, t.original_index, e.target.value)}
+                                  onBlur={() => setYearEditingCategory(null)}
+                                  style={styles.categorySelect}
+                                >
+                                  {["Food", "Transport", "Shopping", "Subscriptions", "Utilities",
+                                    "Healthcare", "Entertainment", "Income", "Investment", "Housing", "Travel", "Other"].map(cat => (
+                                      <option key={cat} value={cat}>{cat}</option>
+                                    ))}
+                                </select>
+                              ) : (
+                                <span
+                                  style={{
+                                    ...styles.categoryBadge,
+                                    background: CATEGORY_COLORS[t.category] || "#95a5a6",
+                                    cursor: "pointer"
+                                  }}
+                                  onClick={() => setYearEditingCategory(String(t.statement_id) + "-" + String(t.original_index))}
+                                  title="Click to edit category"
+                                >
+                                  {t.category} ✎
+                                </span>
+                              )}
+                            </td>
+                            <td style={{
+                              ...styles.td,
+                              color: t.amount < 0 ? "#e05c5c" : "#2ecc71",
+                              fontWeight: "bold"
+                            }}>
+                              {t.amount < 0 ? "-" : "+"}${Math.abs(t.amount).toFixed(2)}
+                            </td>
+                            <td style={styles.td}>
+                              <button
+                                onClick={() => toggleYearTransactionExcluded(t.statement_id, t.original_index, t.excluded)}
+                                style={{
+                                  ...styles.excludeButton,
+                                  background: t.auto_excluded ? "#f0a500" : t.excluded ? "#e05c5c" : "#f0f4f8",
+                                  color: t.auto_excluded || t.excluded ? "white" : "#888",
+                                }}
+                              >
+                                {t.auto_excluded ? "Auto-excluded" : t.excluded ? "Excluded" : "Exclude"}
+                              </button>
+                            </td>
+                          </tr>
+                        ));
+                      })()}
+                    </tbody>
+                  </table>
+                  {yearTransactions
+                    .filter(t => yearCategoryFilter ? t.category === yearCategoryFilter : true)
+                    .filter(t => yearTableSearch ? t.description?.toLowerCase().includes(yearTableSearch.toLowerCase()) : true)
+                    .length === 0 && (
+                      <p style={styles.noTransactions}>No transactions found.</p>
+                    )}
+                </div>
+              </>
+            )}
+
             {/* Single month view */}
-            {householdMonth && householdMonth !== "rolling" && householdData && householdData.people.length > 0 && (
+            {householdMonth && !householdMonth.startsWith("year-") && householdMonth !== "rolling" && householdData && householdData.people.length > 0 && (
               <>
                 <div style={styles.card}>
                   <h2 style={styles.cardTitle}>Combined Household — {formatMonth(householdData.month)}</h2>
@@ -1266,7 +1711,7 @@ export default function App() {
               </>
             )}
 
-            {householdMonth && householdMonth !== "rolling" && (!householdData || householdData.people.length === 0) && (
+            {householdMonth && !householdMonth.startsWith("year-") && householdMonth !== "rolling" && (!householdData || householdData.people.length === 0) && (
               <div style={styles.card}>
                 <p style={styles.noPeopleMsg}>No statements found for {formatMonth(householdMonth)}.</p>
               </div>

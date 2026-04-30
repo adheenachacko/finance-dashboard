@@ -977,6 +977,105 @@ async def get_household_trends(
 
     return result
 
+@app.get("/household-year/{year}")
+async def get_household_year(
+    year: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    people = db.query(Person).filter(
+        Person.user_id == current_user.id
+    ).all()
+
+    year_data = {
+        "year": year,
+        "total_income": 0,
+        "total_spending": 0,
+        "total_savings": 0,
+        "total_invested": 0,
+        "months_tracked": 0,
+        "by_person": [],
+        "by_month": [],
+        "by_category": {}
+    }
+
+    all_months = set()
+    for person in people:
+        statements = db.query(Statement).filter(
+            Statement.person_id == person.id,
+            Statement.month.like(f"{year}-%")
+        ).order_by(Statement.month).all()
+
+        person_data = {
+            "person_name": person.name,
+            "income": 0,
+            "spending": 0,
+            "savings": 0,
+            "invested": 0,
+            "months": len(statements)
+        }
+
+        for s in statements:
+            all_months.add(s.month)
+            person_data["income"] += s.totals.get("income", 0)
+            person_data["spending"] += s.totals.get("spending", 0)
+            person_data["savings"] += s.totals.get("savings", 0)
+            person_data["invested"] += s.totals.get("invested", 0)
+
+            for cat, amt in s.totals.get("categories", {}).items():
+                year_data["by_category"][cat] = year_data["by_category"].get(cat, 0) + amt
+
+        year_data["total_income"] += person_data["income"]
+        year_data["total_spending"] += person_data["spending"]
+        year_data["total_savings"] += person_data["savings"]
+        year_data["total_invested"] += person_data["invested"]
+        year_data["by_person"].append(person_data)
+
+    year_data["months_tracked"] = len(all_months)
+    total = year_data["total_income"] + year_data["total_invested"]
+    year_data["savings_rate"] = round(
+        (year_data["total_savings"] + year_data["total_invested"]) / total * 100, 1
+    ) if total > 0 else 0
+    year_data["avg_monthly_savings"] = round(
+        year_data["total_savings"] / year_data["months_tracked"], 2
+    ) if year_data["months_tracked"] > 0 else 0
+    year_data["by_category"] = dict(
+        sorted(year_data["by_category"].items(), key=lambda x: x[1], reverse=True)
+    )
+
+    return year_data
+
+@app.get("/household-year/{year}/transactions")
+async def get_household_year_transactions(
+    year: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    people = db.query(Person).filter(
+        Person.user_id == current_user.id
+    ).all()
+
+    all_transactions = []
+
+    for person in people:
+        statements = db.query(Statement).filter(
+            Statement.person_id == person.id,
+            Statement.month.like(f"{year}-%")
+        ).order_by(Statement.month).all()
+
+        for s in statements:
+            for t in (s.transactions or []):
+                all_transactions.append({
+                    **t,
+                    "person_name": person.name,
+                    "month": s.month,
+                    "statement_id": s.id,
+                    "original_index": s.transactions.index(t)
+                })
+
+    # Sort by date descending
+    all_transactions.sort(key=lambda x: x.get("date", ""), reverse=True)
+    return all_transactions
 
 @app.get("/health")
 async def health():
