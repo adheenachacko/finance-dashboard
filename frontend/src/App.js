@@ -170,6 +170,16 @@ export default function App() {
   const [householdInsights, setHouseholdInsights] = useState(null);
   const [householdInsightsDate, setHouseholdInsightsDate] = useState(null);
   const [generatingHouseholdInsights, setGeneratingHouseholdInsights] = useState(false);
+  const [netWorthHistory, setNetWorthHistory] = useState([]);
+  const [goals, setGoals] = useState([]);
+  const [planningInsights, setPlanningInsights] = useState(null);
+  const [generatingPlanningInsights, setGeneratingPlanningInsights] = useState(false);
+  const [showAddNetWorth, setShowAddNetWorth] = useState(false);
+  const [showAddGoal, setShowAddGoal] = useState(false);
+  const [newNetWorthDate, setNewNetWorthDate] = useState(new Date().toISOString().slice(0, 7));
+  const [newAccounts, setNewAccounts] = useState([]);
+  const [newGoal, setNewGoal] = useState({ name: "", target_amount: "", current_amount: "", target_date: "", color: "#4f86c6" });
+  const [netWorthPersonId, setNetWorthPersonId] = useState("");
 
   useEffect(() => {
     const token = getToken();
@@ -272,6 +282,93 @@ export default function App() {
       setHouseholdInsightsDate(data.created_at);
     } catch { console.log("Could not generate household insights"); }
     finally { setGeneratingHouseholdInsights(false); }
+  };
+
+  const fetchNetWorth = async () => {
+    try {
+      const response = await fetch(`${API}/net-worth`, { headers: authHeaders() });
+      const data = await response.json();
+      if (Array.isArray(data)) setNetWorthHistory(data);
+    } catch { console.log("Could not fetch net worth"); }
+  };
+
+  const fetchGoals = async () => {
+    try {
+      const response = await fetch(`${API}/goals`, { headers: authHeaders() });
+      const data = await response.json();
+      if (Array.isArray(data)) setGoals(data);
+    } catch { console.log("Could not fetch goals"); }
+  };
+
+  const saveNetWorth = async () => {
+    try {
+      const selectedPerson = people.find(p => p.id === parseInt(netWorthPersonId));
+      const formData = new FormData();
+      formData.append("accounts", JSON.stringify(newAccounts));
+      formData.append("person_id", netWorthPersonId || "");
+      formData.append("person_name", selectedPerson?.name || "Household");
+      await fetch(`${API}/net-worth`, { method: "POST", headers: authHeaders(), body: formData });
+      setShowAddNetWorth(false);
+      setNewAccounts([]);
+      setNetWorthPersonId("");
+      fetchNetWorth();
+    } catch { console.log("Could not save net worth"); }
+  };
+
+  const editNetWorth = (entry) => {
+    setNetWorthPersonId(entry.person_id || "");
+    setNewAccounts(entry.accounts || []);
+    setShowAddNetWorth(true);
+  };
+
+  const deleteNetWorth = async (id) => {
+    if (!window.confirm("Delete this entry?")) return;
+    try {
+      await fetch(`${API}/net-worth/${id}`, { method: "DELETE", headers: authHeaders() });
+      fetchNetWorth();
+    } catch { console.log("Could not delete net worth entry"); }
+  };
+
+  const addAccount = () => {
+    setNewAccounts(prev => [...prev, { name: "", type: "checking", balance: 0 }]);
+  };
+
+  const removeAccount = (i) => {
+    setNewAccounts(prev => prev.filter((_, idx) => idx !== i));
+  };
+
+  const createGoal = async () => {
+    if (!newGoal.name || !newGoal.target_amount) return;
+    try {
+      const formData = new FormData();
+      formData.append("name", newGoal.name);
+      formData.append("target_amount", newGoal.target_amount);
+      formData.append("current_amount", newGoal.current_amount || 0);
+      formData.append("target_date", newGoal.target_date || "");
+      formData.append("color", newGoal.color);
+      await fetch(`${API}/goals`, { method: "POST", headers: authHeaders(), body: formData });
+      setShowAddGoal(false);
+      setNewGoal({ name: "", target_amount: "", current_amount: "", target_date: "", color: "#4f86c6" });
+      fetchGoals();
+    } catch { console.log("Could not create goal"); }
+  };
+
+  const deleteGoal = async (id) => {
+    if (!window.confirm("Delete this goal?")) return;
+    try {
+      await fetch(`${API}/goals/${id}`, { method: "DELETE", headers: authHeaders() });
+      fetchGoals();
+    } catch { console.log("Could not delete goal"); }
+  };
+
+  const fetchPlanningInsights = async () => {
+    setGeneratingPlanningInsights(true);
+    try {
+      const response = await fetch(`${API}/planning/insights`, { method: "POST", headers: authHeaders() });
+      const data = await response.json();
+      setPlanningInsights(data.insights);
+    } catch { console.log("Could not generate planning insights"); }
+    finally { setGeneratingPlanningInsights(false); }
   };
 
   const fetchYearTransactions = async (year) => {
@@ -757,6 +854,7 @@ export default function App() {
             { key: "statement", label: "Statement", disabled: !result },
             { key: "trends", label: "Trends" },
             { key: "household", label: "Household" },
+            { key: "planning", label: "Planning", disabled: false },
           ].map(({ key, label, disabled }) => (
             <button
               key={key}
@@ -768,6 +866,7 @@ export default function App() {
                   fetchHouseholdYear("2026");
                   setSelectedYear("2026");
                 }
+                if (key === "planning") { fetchNetWorth(); fetchGoals(); }
               }}
               style={{
                 ...(activeTab === key ? styles.tabActive : styles.tab),
@@ -1454,7 +1553,17 @@ export default function App() {
                   </div>
 
                   <div style={styles.card}>
-                    <h2 style={styles.cardTitle}>Spending by Category — {householdYear.year}</h2>
+                    <div style={styles.tableHeader}>
+                      <h2 style={styles.cardTitle}>Spending by Category — {householdYear.year}</h2>
+                      <button
+                        onClick={() => {
+                          fetchHouseholdYear(selectedYear);
+                        }}
+                        style={styles.clearFilter}
+                      >
+                        ↻ Refresh
+                      </button>
+                    </div>
                     <ResponsiveContainer width="100%" height={300}>
                       <BarChart
                         data={Object.entries(householdYear.by_category).map(([name, value]) => ({ name, amount: Math.round(value) }))}
@@ -1708,6 +1817,486 @@ export default function App() {
                 <div style={styles.card}>
                   <p style={styles.noPeopleMsg}>Loading household data...</p>
                 </div>
+              )}
+            </div>
+          </div>
+        )}
+        {activeTab === "planning" && (
+          <div>
+            <div style={styles.card}>
+              <PageHeader eyebrow="Future Planning" title="Net Worth & Goals" />
+            </div>
+
+            {/* Net Worth Section */}
+            <div style={styles.card}>
+              <div style={styles.tableHeader}>
+                <h2 style={styles.cardTitle}>Net Worth Snapshot</h2>
+                <button onClick={() => {
+                  setNewAccounts([]);
+                  setNetWorthPersonId(people[0]?.id || "");
+                  setShowAddNetWorth(true);
+                }} style={styles.pillButton}>
+                  + Add / Update
+                </button>
+              </div>
+              <p style={{ color: "#888", fontSize: 13, marginBottom: 20 }}>
+                Your current financial snapshot. Update this whenever your balances change significantly.
+              </p>
+
+              {showAddNetWorth && (
+                <div style={{ background: "#f8f9fa", borderRadius: 12, padding: 20, marginBottom: 20 }}>
+                  <div style={{ display: "flex", gap: 16, marginBottom: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
+                    <div>
+                      <label style={styles.uploadLabel}>Person</label>
+                      <select value={netWorthPersonId}
+                        onChange={(e) => {
+                          setNetWorthPersonId(e.target.value);
+                          // Pre-fill with existing data if available
+                          const existing = netWorthHistory.find(e2 => String(e2.person_id) === String(e.target.value));
+                          if (existing) setNewAccounts(existing.accounts || []);
+                          else setNewAccounts([]);
+                        }}
+                        style={styles.pillSelect}>
+                        <option value="">Select person</option>
+                        {people.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                      </select>
+                    </div>
+                  </div>
+
+                  {newAccounts.map((acc, i) => (
+                    <div key={i} style={{ display: "flex", gap: 12, marginBottom: 10, alignItems: "center" }}>
+                      <input type="text" placeholder="Account name"
+                        value={acc.name}
+                        onChange={(e) => setNewAccounts(prev => prev.map((a, idx) => idx === i ? { ...a, name: e.target.value } : a))}
+                        style={{ ...styles.pillInput, width: 200 }} />
+                      <select value={acc.type}
+                        onChange={(e) => setNewAccounts(prev => prev.map((a, idx) => idx === i ? { ...a, type: e.target.value } : a))}
+                        style={styles.pillSelect}>
+                        <optgroup label="Cash & Savings">
+                          <option value="checking">Checking</option>
+                          <option value="savings">Savings</option>
+                          <option value="hsa">HSA</option>
+                          <option value="money_market">Money Market</option>
+                        </optgroup>
+                        <optgroup label="Investments">
+                          <option value="brokerage">Brokerage (Taxable)</option>
+                          <option value="roth_ira">Roth IRA</option>
+                          <option value="traditional_ira">Traditional IRA</option>
+                          <option value="401k">401(k)</option>
+                          <option value="roth_401k">Roth 401(k)</option>
+                          <option value="403b">403(b)</option>
+                          <option value="529">529 (Education)</option>
+                        </optgroup>
+                        <optgroup label="Other Assets">
+                          <option value="real_estate">Real Estate</option>
+                          <option value="crypto">Crypto</option>
+                          <option value="other_asset">Other Asset</option>
+                        </optgroup>
+                        <optgroup label="Debts">
+                          <option value="credit_card">Credit Card</option>
+                          <option value="student_loan">Student Loan</option>
+                          <option value="mortgage">Mortgage</option>
+                          <option value="car_loan">Car Loan</option>
+                          <option value="other_debt">Other Debt</option>
+                        </optgroup>
+                      </select>
+                      <input type="number" placeholder="Balance"
+                        value={acc.balance === 0 ? "" : Math.abs(acc.balance)}
+                        onChange={(e) => setNewAccounts(prev => prev.map((a, idx) =>
+                          idx === i ? { ...a, balance: parseFloat(e.target.value) || 0 } : a
+                        ))}
+                        style={{ ...styles.pillInput, width: 140 }} />
+                      <button onClick={() => removeAccount(i)} style={styles.removeFileButton}>✕</button>
+                    </div>
+                  ))}
+
+                  {newAccounts.length === 0 && (
+                    <p style={{ color: "#aaa", fontSize: 13, marginBottom: 12 }}>
+                      No accounts yet — click Add Account below.
+                    </p>
+                  )}
+
+                  <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+                    <button onClick={addAccount} style={styles.clearFilter}>+ Add Account</button>
+                    <button onClick={saveNetWorth}
+                      disabled={newAccounts.length === 0 || !netWorthPersonId}
+                      style={newAccounts.length === 0 || !netWorthPersonId ? styles.pillButtonDisabled : styles.pillButton}>
+                      Save Snapshot
+                    </button>
+                    <button onClick={() => { setShowAddNetWorth(false); setNewAccounts([]); }} style={styles.clearFilter}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {netWorthHistory.length > 0 ? (() => {
+                const combinedNetWorth = netWorthHistory.reduce((s, e) => s + e.net_worth, 0);
+                const combinedAssets = netWorthHistory.reduce((s, e) => s + e.total_assets, 0);
+                const combinedDebts = netWorthHistory.reduce((s, e) => s + e.total_debts, 0);
+
+                return (
+                  <>
+                    {/* Combined totals */}
+                    <div style={{ ...styles.totalsRow, marginBottom: 24 }}>
+                      <div style={styles.totalCard}>
+                        <p style={styles.totalLabel}>Combined Net Worth</p>
+                        <p style={{ ...styles.totalAmount, color: "#4f86c6" }}>${Math.round(combinedNetWorth).toLocaleString()}</p>
+                      </div>
+                      <div style={styles.totalCard}>
+                        <p style={styles.totalLabel}>Total Assets</p>
+                        <p style={{ ...styles.totalAmount, color: "#2ecc71" }}>${Math.round(combinedAssets).toLocaleString()}</p>
+                      </div>
+                      <div style={styles.totalCard}>
+                        <p style={styles.totalLabel}>Total Debts</p>
+                        <p style={{ ...styles.totalAmount, color: "#e05c5c" }}>${Math.round(combinedDebts).toLocaleString()}</p>
+                      </div>
+                    </div>
+
+                    {/* Per person cards */}
+                    <div style={styles.householdGrid}>
+                      {netWorthHistory.map((entry, idx) => (
+                        <div key={entry.id} style={{ background: "#f8f9fa", borderRadius: 16, padding: 20 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                            <h3 style={{ margin: 0, color: PERSON_COLORS[idx % PERSON_COLORS.length], fontSize: 16, fontWeight: "700" }}>
+                              {entry.person_name}
+                            </h3>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                              <span style={{ fontSize: 11, color: "#aaa" }}>
+                                Updated {formatMonth(entry.date)}
+                              </span>
+                              <button onClick={() => editNetWorth(entry)} style={{ ...styles.clearFilter, fontSize: 12 }}>
+                                ✎ Edit
+                              </button>
+                              <button onClick={() => deleteNetWorth(entry.id)} style={styles.deleteButton}>✕</button>
+                            </div>
+                          </div>
+
+                          <div style={styles.personTotalsRow}>
+                            <div style={styles.personTotalCard}>
+                              <p style={styles.totalLabel}>Net Worth</p>
+                              <p style={{ ...styles.personTotalAmount, color: "#4f86c6" }}>${Math.round(entry.net_worth).toLocaleString()}</p>
+                            </div>
+                            <div style={styles.personTotalCard}>
+                              <p style={styles.totalLabel}>Assets</p>
+                              <p style={{ ...styles.personTotalAmount, color: "#2ecc71" }}>${Math.round(entry.total_assets).toLocaleString()}</p>
+                            </div>
+                            <div style={styles.personTotalCard}>
+                              <p style={styles.totalLabel}>Debts</p>
+                              <p style={{ ...styles.personTotalAmount, color: "#e05c5c" }}>${Math.round(entry.total_debts).toLocaleString()}</p>
+                            </div>
+                          </div>
+
+                          {entry.accounts?.map((acc, i) => (
+                            <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #e8ecf0" }}>
+                              <div>
+                                <p style={{ margin: 0, fontWeight: "600", fontSize: 13 }}>{acc.name}</p>
+                                <p style={{ margin: 0, fontSize: 11, color: "#aaa", textTransform: "capitalize" }}>
+                                  {acc.type.replace(/_/g, " ")}
+                                </p>
+                              </div>
+                              <p style={{ margin: 0, fontWeight: "700", fontSize: 14, color: acc.balance >= 0 ? "#2ecc71" : "#e05c5c" }}>
+                                {acc.balance < 0 ? "-" : ""}${Math.abs(acc.balance).toLocaleString()}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                );
+              })() : (
+                <p style={styles.noPeopleMsg}>
+                  No snapshot yet. Click Add / Update to enter your current account balances.
+                </p>
+              )}
+            </div>
+
+            {/* Projections */}
+            {netWorthHistory.length > 0 && (() => {
+              const latest = netWorthHistory[netWorthHistory.length - 1];
+              const avgMonthlySavings = statements.length > 0
+                ? statements.slice(0, 3).reduce((s, stmt) => s + (stmt.totals?.savings || 0), 0) / Math.min(statements.length, 3)
+                : 0;
+              const annualReturn = 0.07;
+              const INVESTMENT_TYPES = ["brokerage", "roth_ira", "traditional_ira", "401k", "roth_401k", "403b", "529"];
+              const CASH_TYPES = ["checking", "savings", "money_market", "hsa"];
+
+              const currentInvested = latest.accounts
+                ?.filter(a => INVESTMENT_TYPES.includes(a.type))
+                .reduce((s, a) => s + Math.abs(a.balance), 0) || 0;
+
+              const currentSavings = latest.accounts
+                ?.filter(a => CASH_TYPES.includes(a.type))
+                .reduce((s, a) => s + Math.abs(a.balance), 0) || 0;
+              const projections = [1, 3, 5, 10].map(years => {
+                // Investment accounts grow at 7% annually
+                const investmentGrowth = currentInvested * Math.pow(1 + annualReturn, years);
+                // Cash savings don't grow at 7% but accumulate
+                const cashGrowth = currentSavings;
+                // New monthly savings added each year
+                const newContributions = avgMonthlySavings * 12 * years;
+                // Total = grown investments + existing cash + new savings
+                const total = investmentGrowth + cashGrowth + newContributions;
+                return { years, total: Math.round(total) };
+              });
+
+              const chartProjections = Array.from({ length: 11 }, (_, i) => ({
+                year: `Year ${i}`,
+                projected: Math.round(
+                  currentInvested * Math.pow(1 + annualReturn, i) +
+                  currentSavings +
+                  avgMonthlySavings * 12 * i
+                )
+              }));
+
+              return (
+                <div style={styles.card}>
+                  <h2 style={styles.cardTitle}>Future Projections</h2>
+                  <p style={{ color: "#888", fontSize: 13, marginBottom: 20 }}>
+                    Based on your current net worth and average monthly savings of ${Math.round(avgMonthlySavings).toLocaleString()}.
+                    Investments assume 7% annual return.
+                  </p>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 24 }}>
+                    {projections.map(({ years, total }) => (
+                      <div key={years} style={styles.totalCard}>
+                        <p style={styles.totalLabel}>{years} Year{years > 1 ? "s" : ""}</p>
+                        <p style={{ ...styles.totalAmount, fontSize: 22, color: "#4f86c6" }}>${total.toLocaleString()}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  <ResponsiveContainer width="100%" height={280}>
+                    <LineChart data={chartProjections}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="year" tick={{ fontSize: 12 }} />
+                      <YAxis tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} />
+                      <Tooltip formatter={(value) => `$${Math.round(value).toLocaleString()}`} />
+                      <Line type="monotone" dataKey="projected" name="Projected Net Worth"
+                        stroke="#4f86c6" strokeWidth={3} dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              );
+            })()}
+
+            {/* Savings Goals */}
+            <div style={styles.card}>
+              <div style={styles.tableHeader}>
+                <h2 style={styles.cardTitle}>Savings Goals</h2>
+                <button onClick={() => setShowAddGoal(!showAddGoal)} style={styles.pillButton}>
+                  + Add Goal
+                </button>
+              </div>
+
+              {showAddGoal && (
+                <div style={{ background: "#f8f9fa", borderRadius: 12, padding: 20, marginBottom: 20 }}>
+                  <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 12 }}>
+                    <div>
+                      <label style={styles.uploadLabel}>Goal Name</label>
+                      <input type="text" placeholder="e.g. Italy Trip"
+                        value={newGoal.name}
+                        onChange={(e) => setNewGoal(prev => ({ ...prev, name: e.target.value }))}
+                        style={styles.pillInput} />
+                    </div>
+                    <div>
+                      <label style={styles.uploadLabel}>Target Amount</label>
+                      <input type="number" placeholder="10000"
+                        value={newGoal.target_amount}
+                        onChange={(e) => setNewGoal(prev => ({ ...prev, target_amount: e.target.value }))}
+                        style={{ ...styles.pillInput, width: 140 }} />
+                    </div>
+                    <div>
+                      <label style={styles.uploadLabel}>Already Saved</label>
+                      <input type="number" placeholder="0"
+                        value={newGoal.current_amount}
+                        onChange={(e) => setNewGoal(prev => ({ ...prev, current_amount: e.target.value }))}
+                        style={{ ...styles.pillInput, width: 140 }} />
+                    </div>
+                    <div>
+                      <label style={styles.uploadLabel}>Target Date</label>
+                      <input type="month"
+                        value={newGoal.target_date}
+                        onChange={(e) => setNewGoal(prev => ({ ...prev, target_date: e.target.value }))}
+                        style={styles.pillInput} />
+                    </div>
+                    <div>
+                      <label style={styles.uploadLabel}>Color</label>
+                      <input type="color" value={newGoal.color}
+                        onChange={(e) => setNewGoal(prev => ({ ...prev, color: e.target.value }))}
+                        style={{ width: 48, height: 38, borderRadius: 8, border: "none", cursor: "pointer" }} />
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 12 }}>
+                    <button onClick={createGoal} style={styles.pillButton}>Save Goal</button>
+                    <button onClick={() => setShowAddGoal(false)} style={styles.clearFilter}>Cancel</button>
+                  </div>
+                </div>
+              )}
+
+              {goals.length === 0 ? (
+                <p style={styles.noPeopleMsg}>No goals yet. Add a goal to track your progress.</p>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                  {goals.map(goal => {
+                    const progress = Math.min((goal.current_amount / goal.target_amount) * 100, 100);
+                    const remaining = goal.target_amount - goal.current_amount;
+                    const avgMonthlySavings = statements.length > 0
+                      ? statements.slice(0, 3).reduce((s, stmt) => s + (stmt.totals?.savings || 0), 0) / Math.min(statements.length, 3)
+                      : 0;
+                    const monthsToGoal = avgMonthlySavings > 0 ? Math.ceil(remaining / avgMonthlySavings) : null;
+
+                    return (
+                      <div key={goal.id} style={{ background: "#f8f9fa", borderRadius: 16, padding: 20 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+                          <div>
+                            <h3 style={{ margin: 0, fontSize: 16, fontWeight: "700", color: "#1a1a2e" }}>{goal.name}</h3>
+                            {goal.target_date && (
+                              <p style={{ margin: "2px 0 0 0", fontSize: 12, color: "#aaa" }}>
+                                Target: {formatMonth(goal.target_date)}
+                              </p>
+                            )}
+                          </div>
+                          <div style={{ textAlign: "right" }}>
+                            <p style={{ margin: 0, fontSize: 20, fontWeight: "800", color: goal.color }}>
+                              ${Math.round(goal.current_amount).toLocaleString()}
+                              <span style={{ fontSize: 13, color: "#aaa", fontWeight: "400" }}>
+                                {" "}/ ${Math.round(goal.target_amount).toLocaleString()}
+                              </span>
+                            </p>
+                            {monthsToGoal && (
+                              <p style={{ margin: "2px 0 0 0", fontSize: 12, color: "#888" }}>
+                                ~{monthsToGoal} months at current savings rate
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Progress bar */}
+                        <div style={{ background: "#e8ecf0", borderRadius: 50, height: 10, marginBottom: 8 }}>
+                          <div style={{
+                            background: goal.color,
+                            borderRadius: 50,
+                            height: 10,
+                            width: `${progress}%`,
+                            transition: "width 0.5s"
+                          }} />
+                        </div>
+                        <div style={{ display: "flex", justifyContent: "space-between" }}>
+                          <p style={{ margin: 0, fontSize: 12, color: "#888" }}>{Math.round(progress)}% complete</p>
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <p style={{ margin: 0, fontSize: 12, color: "#888" }}>${Math.round(remaining).toLocaleString()} remaining</p>
+                            <button onClick={() => deleteGoal(goal.id)} style={styles.deleteButton}>✕</button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* AI Planning Insights */}
+            <div style={styles.card}>
+              <div style={styles.tableHeader}>
+                <h2 style={styles.cardTitle}>AI Financial Plan</h2>
+                <button onClick={fetchPlanningInsights} disabled={generatingPlanningInsights}
+                  style={generatingPlanningInsights ? styles.pillButtonDisabled : styles.pillButton}>
+                  {generatingPlanningInsights ? "↻ Generating..." : "✦ Generate Plan"}
+                </button>
+              </div>
+              {generatingPlanningInsights && (
+                <div style={styles.insightsLoadingBar}><div style={styles.insightsLoadingFill} /></div>
+              )}
+              {planningInsights ? (
+                <>
+                  <p style={styles.summary}>{planningInsights.summary}</p>
+
+                  <div style={styles.insightBox}>
+                    <p style={styles.insightLabel}>Net Worth Analysis</p>
+                    <p style={{ margin: 0, fontSize: 14 }}>{planningInsights.net_worth_analysis}</p>
+                  </div>
+
+                  <div style={styles.insightBox}>
+                    <p style={styles.insightLabel}>Investment Analysis</p>
+                    <p style={{ margin: 0, fontSize: 14 }}>{planningInsights.investment_analysis}</p>
+                  </div>
+
+                  {planningInsights.tax_optimization && (
+                    <div style={styles.insightBox}>
+                      <p style={styles.insightLabel}>Tax Optimization</p>
+                      <p style={{ margin: 0, fontSize: 14 }}>{planningInsights.tax_optimization}</p>
+                    </div>
+                  )}
+
+                  {planningInsights.emergency_fund_assessment && (
+                    <div style={styles.insightBox}>
+                      <p style={styles.insightLabel}>Emergency Fund</p>
+                      <p style={{ margin: 0, fontSize: 14 }}>{planningInsights.emergency_fund_assessment}</p>
+                    </div>
+                  )}
+
+                  {planningInsights.debt_strategy && (
+                    <div style={styles.insightBox}>
+                      <p style={styles.insightLabel}>Debt Strategy</p>
+                      <p style={{ margin: 0, fontSize: 14 }}>{planningInsights.debt_strategy}</p>
+                    </div>
+                  )}
+
+                  {planningInsights.goal_analysis?.length > 0 && (
+                    <>
+                      <p style={styles.insightLabel}>Goal Analysis</p>
+                      {planningInsights.goal_analysis.map((g, i) => (
+                        <div key={i} style={{ ...styles.insightBox, marginBottom: 12 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                            <p style={{ margin: 0, fontWeight: "700", fontSize: 14 }}>{g.goal_name}</p>
+                            <span style={{
+                              fontSize: 11, fontWeight: "700", padding: "2px 8px", borderRadius: 50,
+                              background: g.on_track ? "#e8f8ee" : "#ffeaea",
+                              color: g.on_track ? "#2ecc71" : "#e05c5c"
+                            }}>
+                              {g.on_track ? "On Track" : "Needs Attention"}
+                            </span>
+                          </div>
+                          <p style={{ margin: "0 0 6px 0", fontSize: 13, color: "#555" }}>{g.insight}</p>
+                          <p style={{ margin: 0, fontSize: 13, color: "#4f86c6", fontWeight: "600" }}>💡 {g.recommendation}</p>
+                        </div>
+                      ))}
+                    </>
+                  )}
+
+                  <p style={styles.insightLabel}>Top Recommendations</p>
+                  {planningInsights.top_recommendations?.map((rec, i) => (
+                    <div key={i} style={{ ...styles.insightBox, marginBottom: 12 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                        <p style={{ margin: 0, fontWeight: "700", fontSize: 14 }}>{rec.title}</p>
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <span style={{
+                            fontSize: 11, padding: "2px 8px", borderRadius: 50, fontWeight: "600",
+                            background: rec.impact === "high" ? "#ffeaea" : rec.impact === "medium" ? "#fff8e1" : "#f0f4f8",
+                            color: rec.impact === "high" ? "#e05c5c" : rec.impact === "medium" ? "#f0a500" : "#888"
+                          }}>
+                            {rec.impact} impact
+                          </span>
+                          <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 50, background: "#f0f6ff", color: "#4f86c6", fontWeight: "600" }}>
+                            {rec.timeframe}
+                          </span>
+                        </div>
+                      </div>
+                      <p style={{ margin: 0, fontSize: 13, color: "#555" }}>{rec.description}</p>
+                    </div>
+                  ))}
+
+                  <div style={styles.insightBox}>
+                    <p style={styles.insightLabel}>Risk Assessment</p>
+                    <p style={{ margin: 0, fontSize: 14 }}>{planningInsights.risk_assessment}</p>
+                  </div>
+                </>
+              ) : (
+                <p style={styles.noPeopleMsg}>
+                  Add your account balances and goals above, then click Generate Plan for personalized financial planning advice.
+                </p>
               )}
             </div>
           </div>

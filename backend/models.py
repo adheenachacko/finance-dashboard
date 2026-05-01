@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, JSON, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, JSON, ForeignKey, Float, create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
@@ -66,6 +66,34 @@ class HouseholdInsight(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     year = Column(String, nullable=False)
     insights = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class NetWorthEntry(Base):
+    __tablename__ = "net_worth_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    person_id = Column(Integer, ForeignKey("people.id"), nullable=True)
+    person_name = Column(String, nullable=True)
+    date = Column(String, nullable=False)
+    accounts = Column(JSON, nullable=True)
+    total_assets = Column(Float, default=0)
+    total_debts = Column(Float, default=0)
+    net_worth = Column(Float, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SavingsGoal(Base):
+    __tablename__ = "savings_goals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    name = Column(String, nullable=False)
+    target_amount = Column(Float, nullable=False)
+    current_amount = Column(Float, default=0)
+    target_date = Column(String, nullable=True)  # YYYY-MM format
+    color = Column(String, default="#4f86c6")
     created_at = Column(DateTime, default=datetime.utcnow)
     
 def create_tables():

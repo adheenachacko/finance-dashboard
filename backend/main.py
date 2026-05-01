@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 from models import Statement, Person, User, create_tables, get_db
 from auth import hash_password, verify_password, create_access_token, get_current_user
-from models import Statement, Person, User, ChatMessage, HouseholdInsight, create_tables, get_db
+from models import Statement, Person, User, ChatMessage, HouseholdInsight, NetWorthEntry, SavingsGoal, create_tables, get_db
 import io
 import json
 import os
@@ -1239,6 +1239,326 @@ async def get_household_insights(
         return {"insights": None, "created_at": None}
 
     return {"insights": existing.insights, "created_at": str(existing.created_at)}
+# ── Net Worth ─────────────────────────────────────────
+
+@app.post("/net-worth")
+async def save_net_worth(
+    accounts: str = Form(...),
+    person_id: int = Form(None),
+    person_name: str = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    accounts_data = json.loads(accounts)
+
+    DEBT_TYPES = {"credit_card", "student_loan", "mortgage", "car_loan", "other_debt"}
+    for a in accounts_data:
+        if a.get("type") in DEBT_TYPES and a["balance"] > 0:
+            a["balance"] = -a["balance"]
+
+    total_assets = sum(a["balance"] for a in accounts_data if a["balance"] > 0)
+    total_debts = sum(abs(a["balance"]) for a in accounts_data if a["balance"] < 0)
+    net_worth = total_assets - total_debts
+
+    # One snapshot per person — always update existing
+    existing = db.query(NetWorthEntry).filter(
+        NetWorthEntry.user_id == current_user.id,
+        NetWorthEntry.person_id == person_id
+    ).first()
+
+    if existing:
+        existing.accounts = accounts_data
+        existing.total_assets = total_assets
+        existing.total_debts = total_debts
+        existing.net_worth = net_worth
+        existing.person_name = person_name
+        existing.date = datetime.utcnow().strftime("%Y-%m")
+        flag_modified(existing, "accounts")
+        db.commit()
+        db.refresh(existing)
+        return {"id": existing.id, "person_id": existing.person_id,
+                "person_name": existing.person_name, "accounts": existing.accounts,
+                "total_assets": existing.total_assets, "total_debts": existing.total_debts,
+                "net_worth": existing.net_worth, "date": existing.date}
+    else:
+        entry = NetWorthEntry(
+            user_id=current_user.id,
+            person_id=person_id,
+            person_name=person_name,
+            date=datetime.utcnow().strftime("%Y-%m"),
+            accounts=accounts_data,
+            total_assets=total_assets,
+            total_debts=total_debts,
+            net_worth=net_worth
+        )
+        db.add(entry)
+        db.commit()
+        db.refresh(entry)
+        return {"id": entry.id, "person_id": entry.person_id,
+                "person_name": entry.person_name, "accounts": entry.accounts,
+                "total_assets": entry.total_assets, "total_debts": entry.total_debts,
+                "net_worth": entry.net_worth, "date": entry.date}
+
+
+@app.get("/net-worth")
+async def get_net_worth(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    entries = db.query(NetWorthEntry).filter(
+        NetWorthEntry.user_id == current_user.id
+    ).all()
+
+    return [
+        {
+            "id": e.id,
+            "date": e.date,
+            "person_id": e.person_id,
+            "person_name": e.person_name,
+            "accounts": e.accounts,
+            "total_assets": e.total_assets,
+            "total_debts": e.total_debts,
+            "net_worth": e.net_worth
+        }
+        for e in entries
+    ]
+
+@app.delete("/net-worth/{entry_id}")
+async def delete_net_worth_entry(
+    entry_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    entry = db.query(NetWorthEntry).filter(
+        NetWorthEntry.id == entry_id,
+        NetWorthEntry.user_id == current_user.id
+    ).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    db.delete(entry)
+    db.commit()
+    return {"message": "Deleted"}
+
+
+# ── Savings Goals ─────────────────────────────────────
+
+@app.post("/goals")
+async def create_goal(
+    name: str = Form(...),
+    target_amount: float = Form(...),
+    current_amount: float = Form(0),
+    target_date: str = Form(None),
+    color: str = Form("#4f86c6"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    goal = SavingsGoal(
+        user_id=current_user.id,
+        name=name,
+        target_amount=target_amount,
+        current_amount=current_amount,
+        target_date=target_date,
+        color=color
+    )
+    db.add(goal)
+    db.commit()
+    db.refresh(goal)
+    return {"id": goal.id, "name": goal.name, "target_amount": goal.target_amount,
+            "current_amount": goal.current_amount, "target_date": goal.target_date, "color": goal.color}
+
+
+@app.get("/goals")
+async def get_goals(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    goals = db.query(SavingsGoal).filter(
+        SavingsGoal.user_id == current_user.id
+    ).order_by(SavingsGoal.created_at).all()
+    return [
+        {"id": g.id, "name": g.name, "target_amount": g.target_amount,
+         "current_amount": g.current_amount, "target_date": g.target_date, "color": g.color}
+        for g in goals
+    ]
+
+
+@app.patch("/goals/{goal_id}")
+async def update_goal(
+    goal_id: int,
+    name: str = Form(None),
+    target_amount: float = Form(None),
+    current_amount: float = Form(None),
+    target_date: str = Form(None),
+    color: str = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    goal = db.query(SavingsGoal).filter(
+        SavingsGoal.id == goal_id,
+        SavingsGoal.user_id == current_user.id
+    ).first()
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    if name is not None: goal.name = name
+    if target_amount is not None: goal.target_amount = target_amount
+    if current_amount is not None: goal.current_amount = current_amount
+    if target_date is not None: goal.target_date = target_date
+    if color is not None: goal.color = color
+    db.commit()
+    db.refresh(goal)
+    return {"id": goal.id, "name": goal.name, "target_amount": goal.target_amount,
+            "current_amount": goal.current_amount, "target_date": goal.target_date, "color": goal.color}
+
+
+@app.delete("/goals/{goal_id}")
+async def delete_goal(
+    goal_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    goal = db.query(SavingsGoal).filter(
+        SavingsGoal.id == goal_id,
+        SavingsGoal.user_id == current_user.id
+    ).first()
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    db.delete(goal)
+    db.commit()
+    return {"message": "Deleted"}
+
+
+# ── Planning Insights ─────────────────────────────────
+
+@app.post("/planning/insights")
+async def generate_planning_insights(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Get net worth history
+    net_worth_entries = db.query(NetWorthEntry).filter(
+        NetWorthEntry.user_id == current_user.id
+    ).order_by(NetWorthEntry.date).all()
+
+    # Get goals
+    goals = db.query(SavingsGoal).filter(
+        SavingsGoal.user_id == current_user.id
+    ).all()
+
+    # Get avg savings rate from last 3 months of statements
+    people = db.query(Person).filter(Person.user_id == current_user.id).all()
+    recent_statements = []
+    for person in people:
+        stmts = db.query(Statement).filter(
+            Statement.person_id == person.id
+        ).order_by(Statement.month.desc()).limit(3).all()
+        recent_statements.extend(stmts)
+
+    avg_monthly_savings = 0
+    avg_savings_rate = 0
+    avg_monthly_invested = 0
+    if recent_statements:
+        avg_monthly_savings = sum(s.totals.get("savings", 0) for s in recent_statements) / len(recent_statements)
+        avg_savings_rate = sum(s.totals.get("savings_rate", 0) for s in recent_statements) / len(recent_statements)
+        avg_monthly_invested = sum(s.totals.get("invested", 0) for s in recent_statements) / len(recent_statements)
+
+    latest_net_worth = net_worth_entries[-1] if net_worth_entries else None
+    current_net_worth = latest_net_worth.net_worth if latest_net_worth else 0
+    current_invested = sum(
+        a["balance"] for a in (latest_net_worth.accounts or [])
+        if a.get("type") == "investment" and a["balance"] > 0
+    ) if latest_net_worth else 0
+
+    INVESTMENT_TYPES = {"brokerage", "roth_ira", "traditional_ira", "401k", "roth_401k", "403b", "529"}
+    RETIREMENT_TYPES = {"roth_ira", "traditional_ira", "401k", "roth_401k", "403b"}
+    DEBT_TYPES = {"credit_card", "student_loan", "mortgage", "car_loan", "other_debt"}
+
+    latest_accounts = latest_net_worth.accounts or [] if latest_net_worth else []
+
+    account_breakdown = {
+        "retirement_accounts": [
+            {"name": a["name"], "type": a["type"], "balance": a["balance"]}
+            for a in latest_accounts if a.get("type") in RETIREMENT_TYPES
+        ],
+        "brokerage_accounts": [
+            {"name": a["name"], "type": a["type"], "balance": a["balance"]}
+            for a in latest_accounts if a.get("type") == "brokerage"
+        ],
+        "cash_accounts": [
+            {"name": a["name"], "type": a["type"], "balance": a["balance"]}
+            for a in latest_accounts if a.get("type") in {"checking", "savings", "money_market", "hsa"}
+        ],
+        "debts": [
+            {"name": a["name"], "type": a["type"], "balance": a["balance"]}
+            for a in latest_accounts if a.get("type") in DEBT_TYPES
+        ],
+        "other": [
+            {"name": a["name"], "type": a["type"], "balance": a["balance"]}
+            for a in latest_accounts if a.get("type") in {"real_estate", "crypto", "other_asset"}
+        ]
+    }
+
+    total_retirement = sum(a["balance"] for a in account_breakdown["retirement_accounts"])
+    total_brokerage = sum(a["balance"] for a in account_breakdown["brokerage_accounts"])
+    total_cash = sum(a["balance"] for a in account_breakdown["cash_accounts"])
+    total_debt = sum(abs(a["balance"]) for a in account_breakdown["debts"])
+
+    summary = {
+        "current_net_worth": current_net_worth,
+        "account_breakdown": account_breakdown,
+        "total_retirement_savings": total_retirement,
+        "total_brokerage": total_brokerage,
+        "total_cash": total_cash,
+        "total_debt": total_debt,
+        "avg_monthly_savings": round(avg_monthly_savings, 2),
+        "avg_monthly_invested": round(avg_monthly_invested, 2),
+        "avg_savings_rate": round(avg_savings_rate, 1),
+        "goals": [{"name": g.name, "target": g.target_amount, "current": g.current_amount,
+                "target_date": g.target_date} for g in goals],
+        "net_worth_trend": [{"date": e.date, "net_worth": e.net_worth} for e in net_worth_entries]
+    }
+
+    message = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=2000,
+        messages=[{
+            "role": "user",
+            "content": f"""You are a certified financial planner for a couple. Analyze their complete financial picture and provide specific, actionable advice.
+
+Return a JSON object with this exact structure, nothing else:
+
+{{
+  "summary": "3-4 sentence overview of their financial health and trajectory",
+  "net_worth_analysis": "specific analysis of their net worth composition — comment on their cash vs investment vs debt balance",
+  "investment_analysis": "detailed analysis of their investment strategy — comment specifically on their retirement accounts (Roth IRA, 401k etc), taxable brokerage, and whether their allocation makes sense. Include specific recommendations about contribution limits and tax strategy",
+  "goal_analysis": [
+    {{"goal_name": "goal name", "on_track": true, "months_to_goal": 12, "insight": "specific insight", "recommendation": "specific action with dollar amount"}}
+  ],
+  "projection_insights": "insight about their 5 and 10 year trajectory based on current savings rate and investment returns",
+  "top_recommendations": [
+    {{"title": "recommendation title", "description": "detailed actionable recommendation with specific dollar amounts", "impact": "high/medium/low", "timeframe": "immediate/3 months/1 year"}}
+  ],
+  "tax_optimization": "specific advice on tax-advantaged accounts — are they maxing Roth IRA ($7000/year), 401k ($23000/year)? What should they prioritize?",
+  "emergency_fund_assessment": "is their cash sufficient for 3-6 months of expenses? Based on their spending of $X/month they need $Y",
+  "debt_strategy": "if they have debts, specific payoff strategy. If no debts, note that and suggest next steps",
+  "risk_assessment": "assessment of financial risks and specific mitigation strategies"
+}}
+
+2026 contribution limits for reference: Roth IRA $7000/year, 401k $23500/year, HSA $4300/year (single) or $8550 (family).
+Be very specific — use their actual numbers. Reference account names and balances directly.
+
+Financial data:
+{json.dumps(summary, indent=2)}"""
+        }]
+    )
+
+    raw = message.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.strip()
+    insights = json.loads(raw)
+    return {"insights": insights}
 
 @app.get("/health")
 async def health():
