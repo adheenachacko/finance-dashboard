@@ -16,6 +16,8 @@ const CATEGORY_COLORS = {
   Housing: "#2c3e50",
   Travel: "#16a085",
   Other: "#95a5a6",
+  Groceries: "#27ae60",
+  Fitness: "#e67e22",
 };
 
 const PERSON_COLORS = ["#4f86c6", "#e05c5c", "#2ecc71", "#f0a500"];
@@ -164,6 +166,10 @@ export default function App() {
   const [yearStatusFilter, setYearStatusFilter] = useState("all");
   const [yearSort, setYearSort] = useState({ col: null, dir: "asc" });
   const [yearEditingCategory, setYearEditingCategory] = useState(null);
+  const [selectedYear, setSelectedYear] = useState("2026");
+  const [householdInsights, setHouseholdInsights] = useState(null);
+  const [householdInsightsDate, setHouseholdInsightsDate] = useState(null);
+  const [generatingHouseholdInsights, setGeneratingHouseholdInsights] = useState(false);
 
   useEffect(() => {
     const token = getToken();
@@ -241,7 +247,31 @@ export default function App() {
       const data = await response.json();
       setHouseholdYear(data);
       fetchYearTransactions(year);
+      fetchHouseholdInsights(year);
     } catch { console.log("Could not fetch household year"); }
+  };
+
+  const fetchHouseholdInsights = async (year) => {
+    try {
+      const response = await fetch(`${API}/household-year/${year}/insights`, { headers: authHeaders() });
+      const data = await response.json();
+      setHouseholdInsights(data.insights);
+      setHouseholdInsightsDate(data.created_at);
+    } catch { console.log("Could not fetch household insights"); }
+  };
+
+  const generateHouseholdInsights = async () => {
+    setGeneratingHouseholdInsights(true);
+    try {
+      const response = await fetch(
+        `${API}/household-year/${selectedYear}/insights`,
+        { method: "POST", headers: authHeaders() }
+      );
+      const data = await response.json();
+      setHouseholdInsights(data.insights);
+      setHouseholdInsightsDate(data.created_at);
+    } catch { console.log("Could not generate household insights"); }
+    finally { setGeneratingHouseholdInsights(false); }
   };
 
   const fetchYearTransactions = async (year) => {
@@ -347,6 +377,8 @@ export default function App() {
       fetchPeople(); fetchStatements(); setResult(null);
     } catch { console.log("Could not delete person"); }
   };
+
+  const availableYears = [...new Set(statements.map(s => s.month.slice(0, 4)))].sort().reverse();
 
   const handleAnalyze = async () => {
     if (!files.length || !selectedPersonId) return;
@@ -546,6 +578,23 @@ export default function App() {
     finally { setRefreshingInsights(false); }
   };
 
+  const recalculateTotals = async () => {
+    if (!result?.id) return;
+    try {
+      const response = await fetch(
+        `${API}/statements/${result.id}/recalculate`,
+        { method: "POST", headers: authHeaders() }
+      );
+      const data = await response.json();
+      setResult(prev => ({
+        ...prev,
+        ...data.totals,
+        categories: data.totals.categories
+      }));
+      fetchStatements();
+    } catch { console.log("Could not recalculate"); }
+  };
+
   const handleLogout = () => {
     localStorage.removeItem("token");
     setUser(null); setPeople([]); setStatements([]); setResult(null);
@@ -715,7 +764,10 @@ export default function App() {
                 if (disabled) return;
                 setActiveTab(key);
                 if (key === "trends" && trendsPerson) fetchTrends(trendsPerson);
-                if (key === "household" && householdMonth) fetchHousehold(householdMonth);
+                if (key === "household") {
+                  fetchHouseholdYear("2026");
+                  setSelectedYear("2026");
+                }
               }}
               style={{
                 ...(activeTab === key ? styles.tabActive : styles.tab),
@@ -883,13 +935,18 @@ export default function App() {
             <div style={styles.card}>
               <div style={styles.tableHeader}>
                 <h2 style={styles.cardTitle}>AI Insights</h2>
-                <button
-                  onClick={refreshInsights}
-                  disabled={refreshingInsights}
-                  style={refreshingInsights ? styles.pillButtonDisabled : styles.pillButton}
-                >
-                  {refreshingInsights ? "↻ Generating..." : "✦ Generate Insights"}
-                </button>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={recalculateTotals} style={styles.clearFilter}>
+                    ↻ Recalculate Totals
+                  </button>
+                  <button
+                    onClick={refreshInsights}
+                    disabled={refreshingInsights}
+                    style={refreshingInsights ? styles.pillButtonDisabled : styles.pillButton}
+                  >
+                    {refreshingInsights ? "↻ Generating..." : "✦ Generate Insights"}
+                  </button>
+                </div>
               </div>
               {refreshingInsights && (
                 <div style={styles.insightsLoadingBar}>
@@ -988,7 +1045,7 @@ export default function App() {
                         style={styles.filterSelect}>
                         <option value="">All</option>
                         {["Food", "Transport", "Shopping", "Subscriptions", "Utilities",
-                          "Healthcare", "Entertainment", "Income", "Investment", "Housing", "Travel", "Other"].map(cat => (
+                          "Healthcare", "Entertainment", "Income", "Investment", "Housing", "Travel", "Groceries", "Fitness", "Other"].map(cat => (
                             <option key={cat} value={cat}>{cat}</option>
                           ))}
                       </select>
@@ -1045,7 +1102,7 @@ export default function App() {
                             style={styles.categorySelect}
                           >
                             {["Food", "Transport", "Shopping", "Subscriptions", "Utilities",
-                              "Healthcare", "Entertainment", "Income", "Investment", "Housing", "Travel", "Other"].map(cat => (
+                              "Healthcare", "Entertainment", "Income", "Investment", "Housing", "Travel", "Groceries", "Fitness", "Other"].map(cat => (
                                 <option key={cat} value={cat}>{cat}</option>
                               ))}
                           </select>
@@ -1187,535 +1244,472 @@ export default function App() {
 
         {/* Household Tab */}
         {activeTab === "household" && (
-          <div>
-            <div style={styles.card}>
-              <PageHeader eyebrow="Combined View" title="Household" />
-              <div style={styles.trendsControls}>
-                <div>
-                  <label style={styles.uploadLabel}>Month</label>
-                  <select
-                    value={householdMonth}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setHouseholdMonth(val);
-                      if (val === "rolling") {
-                        fetchHouseholdTrends();
-                      } else if (val === "year-2026") {
-                        fetchHouseholdYear("2026");
-                      } else if (val === "year-2025") {
-                        fetchHouseholdYear("2025");
-                      } else if (val) {
-                        fetchHousehold(val);
-                      }
-                    }}
-                    style={styles.pillSelect}
-                  >
-                    <option value="">Select a view</option>
-                    <option value="year-2026">📅 2026 Annual Summary</option>
-                    <option value="year-2025">📅 2025 Annual Summary</option>
-                    <option value="rolling">📊 3 Month Rolling Average</option>
-                    {availableMonths.map(m => (
-                      <option key={m} value={m}>{formatMonth(m)}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
+          <div style={{ display: "flex", gap: 20 }}>
+
+            {/* Year selector sidebar */}
+            <div style={styles.yearSidebar}>
+              <p style={styles.yearSidebarTitle}>Year</p>
+              {availableYears.map(year => (
+                <button
+                  key={year}
+                  onClick={() => {
+                    setSelectedYear(year);
+                    setHouseholdInsights(null);
+                    setHouseholdInsightsDate(null);
+                    fetchHouseholdYear(year);
+                  }}
+                  style={{
+                    ...styles.yearButton,
+                    background: selectedYear === year ? "#4f86c6" : "white",
+                    color: selectedYear === year ? "white" : "#555",
+                    fontWeight: selectedYear === year ? "700" : "400",
+                  }}
+                >
+                  {year}
+                </button>
+              ))}
             </div>
 
-            {/* Rolling average view */}
-            {householdMonth === "rolling" && householdTrends.length > 0 && (
-              <>
-                <div style={styles.card}>
-                  <h2 style={styles.cardTitle}>3 Month Rolling Average — Household</h2>
-                  <p style={styles.chartHint}>Each month shows the average of that month and the two preceding months</p>
-                  {(() => {
-                    const latest = householdTrends[householdTrends.length - 1];
-                    return (
-                      <div style={styles.totalsRow}>
-                        {[
-                          { label: "Avg Monthly Income", value: latest.rolling_income, color: "#1a1a2e" },
-                          { label: "Avg Monthly Spending", value: latest.rolling_spending, color: "#e05c5c" },
-                          { label: "Avg Monthly Savings", value: latest.rolling_savings, color: "#2ecc71" },
-                        ].map(({ label, value, color }) => (
-                          <div key={label} style={styles.totalCard}>
-                            <p style={styles.totalLabel}>{label}</p>
-                            <p style={{ ...styles.totalAmount, color }}>${value.toLocaleString()}</p>
-                          </div>
-                        ))}
-                        <div style={styles.totalCard}>
-                          <p style={styles.totalLabel}>Avg Savings Rate</p>
-                          <p style={{ ...styles.totalAmount, color: "#4f86c6" }}>{latest.rolling_savings_rate}%</p>
+            {/* Main content */}
+            <div style={{ flex: 1 }}>
+              {householdYear ? (
+                <>
+                  <div style={styles.card}>
+                    <PageHeader eyebrow="Combined View" title={`${householdYear.year} Household Summary`} />
+                    <p style={{ color: "#888", fontSize: 13, marginBottom: 20 }}>
+                      Based on {householdYear.months_tracked} month{householdYear.months_tracked !== 1 ? "s" : ""} of data
+                    </p>
+
+                    <div style={styles.totalsRow}>
+                      {[
+                        { label: "Total Income", value: householdYear.total_income, color: "#1a1a2e" },
+                        { label: "Total Spending", value: householdYear.total_spending, color: "#e05c5c" },
+                        { label: "Total Invested", value: householdYear.total_invested, color: "#9b59b6" },
+                        { label: "Total Saved", value: householdYear.total_savings, color: "#2ecc71" },
+                      ].map(({ label, value, color }) => (
+                        <div key={label} style={styles.totalCard}>
+                          <p style={styles.totalLabel}>{label}</p>
+                          <p style={{ ...styles.totalAmount, color }}>${Math.round(value).toLocaleString()}</p>
                         </div>
-                      </div>
-                    );
-                  })()}
-                </div>
-
-                <div style={styles.card}>
-                  <h3 style={styles.chartSubtitle}>Household Income vs Spending</h3>
-                  <ResponsiveContainer width="100%" height={300}>
-                    <BarChart data={householdTrends.map(d => ({ ...d, month: formatMonthShort(d.month) }))}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="month" />
-                      <YAxis />
-                      <Tooltip formatter={(value) => `$${value.toLocaleString()}`} />
-                      <Legend />
-                      <Bar dataKey="income" name="Income" fill="#4f86c6" />
-                      <Bar dataKey="spending" name="Spending" fill="#e05c5c" />
-                    </BarChart>
-                  </ResponsiveContainer>
-
-                  <h3 style={styles.chartSubtitle}>Rolling 3 Month Savings Rate</h3>
-                  <ResponsiveContainer width="100%" height={250}>
-                    <LineChart data={householdTrends.map(d => ({ ...d, month: formatMonthShort(d.month) }))}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="month" />
-                      <YAxis unit="%" />
-                      <Tooltip formatter={(value) => `${value}%`} />
-                      <Legend />
-                      <Line type="monotone" dataKey="savings_rate" name="Monthly Rate"
-                        stroke="#2ecc71" strokeWidth={2} dot={{ r: 4 }} />
-                      <Line type="monotone" dataKey="rolling_savings_rate" name="3 Month Avg"
-                        stroke="#4f86c6" strokeWidth={2} strokeDasharray="5 5" dot={false} />
-                    </LineChart>
-                  </ResponsiveContainer>
-
-                  <h3 style={styles.chartSubtitle}>Monthly Breakdown</h3>
-                  <table style={styles.table}>
-                    <thead>
-                      <tr>
-                        <th style={styles.th}>Month</th>
-                        <th style={styles.th}>Income</th>
-                        <th style={styles.th}>Spending</th>
-                        <th style={styles.th}>Savings</th>
-                        <th style={styles.th}>Rate</th>
-                        <th style={styles.th}>3 Month Avg Rate</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {householdTrends.map((d, i) => (
-                        <tr key={i} style={i % 2 === 0 ? styles.rowEven : styles.rowOdd}>
-                          <td style={styles.td}>{formatMonth(d.month)}</td>
-                          <td style={{ ...styles.td, color: "#4f86c6", fontWeight: "bold" }}>${d.income.toLocaleString()}</td>
-                          <td style={{ ...styles.td, color: "#e05c5c", fontWeight: "bold" }}>${d.spending.toLocaleString()}</td>
-                          <td style={{ ...styles.td, color: d.savings > 0 ? "#2ecc71" : "#e05c5c", fontWeight: "bold" }}>${d.savings.toLocaleString()}</td>
-                          <td style={{ ...styles.td, color: "#4f86c6", fontWeight: "bold" }}>{d.savings_rate}%</td>
-                          <td style={{ ...styles.td, color: "#9b59b6", fontWeight: "bold" }}>{d.rolling_savings_rate}%</td>
-                        </tr>
                       ))}
-                    </tbody>
-                  </table>
-                </div>
-              </>
-            )}
-
-            {/* Year view */}
-            {householdMonth?.startsWith("year-") && householdYear && (
-              <>
-                <div style={styles.card}>
-                  <h2 style={styles.cardTitle}>
-                    {householdYear.year} Annual Summary — Household
-                  </h2>
-                  <p style={{ color: "#888", fontSize: 13, marginBottom: 20 }}>
-                    Based on {householdYear.months_tracked} month{householdYear.months_tracked !== 1 ? "s" : ""} of data
-                  </p>
-
-                  <div style={styles.totalsRow}>
-                    {[
-                      { label: "Total Income", value: householdYear.total_income, color: "#1a1a2e" },
-                      { label: "Total Spending", value: householdYear.total_spending, color: "#e05c5c" },
-                      { label: "Total Invested", value: householdYear.total_invested, color: "#9b59b6" },
-                      { label: "Total Saved", value: householdYear.total_savings, color: "#2ecc71" },
-                    ].map(({ label, value, color }) => (
-                      <div key={label} style={styles.totalCard}>
-                        <p style={styles.totalLabel}>{label}</p>
-                        <p style={{ ...styles.totalAmount, color }}>${Math.round(value).toLocaleString()}</p>
+                      <div style={styles.totalCard}>
+                        <p style={styles.totalLabel}>Savings Rate</p>
+                        <p style={{ ...styles.totalAmount, color: "#4f86c6" }}>{householdYear.savings_rate}%</p>
                       </div>
-                    ))}
-                    <div style={styles.totalCard}>
-                      <p style={styles.totalLabel}>Savings Rate</p>
-                      <p style={{ ...styles.totalAmount, color: "#4f86c6" }}>{householdYear.savings_rate}%</p>
+                    </div>
+
+                    <div style={{
+                      background: "linear-gradient(135deg, #1a1a2e 0%, #4f86c6 100%)",
+                      borderRadius: 16,
+                      padding: 24,
+                      textAlign: "center",
+                      color: "white"
+                    }}>
+                      <p style={{ margin: "0 0 8px 0", fontSize: 13, opacity: 0.8, textTransform: "uppercase", letterSpacing: "1px" }}>
+                        Average Monthly Savings
+                      </p>
+                      <p style={{ margin: 0, fontSize: 36, fontWeight: "800" }}>
+                        ${Math.round(householdYear.avg_monthly_savings).toLocaleString()}
+                      </p>
+                      <p style={{ margin: "8px 0 0 0", fontSize: 12, opacity: 0.7 }}>
+                        per month across {householdYear.months_tracked} months tracked
+                      </p>
                     </div>
                   </div>
 
-                  <div style={{
-                    background: "linear-gradient(135deg, #1a1a2e 0%, #4f86c6 100%)",
-                    borderRadius: 16,
-                    padding: 24,
-                    textAlign: "center",
-                    marginBottom: 20,
-                    color: "white"
-                  }}>
-                    <p style={{ margin: "0 0 8px 0", fontSize: 13, opacity: 0.8, textTransform: "uppercase", letterSpacing: "1px" }}>
-                      Average Monthly Savings
-                    </p>
-                    <p style={{ margin: 0, fontSize: 36, fontWeight: "800" }}>
-                      ${Math.round(householdYear.avg_monthly_savings).toLocaleString()}
-                    </p>
-                    <p style={{ margin: "8px 0 0 0", fontSize: 12, opacity: 0.7 }}>
-                      per month across {householdYear.months_tracked} months tracked
-                    </p>
-                  </div>
-                </div>
-
-                <div style={styles.householdGrid}>
-                  {householdYear.by_person.map((person, idx) => {
-                    const color = PERSON_COLORS[idx % PERSON_COLORS.length];
-                    return (
-                      <div key={person.person_name} style={styles.card}>
-                        <h2 style={{ ...styles.cardTitle, color }}>{person.person_name}</h2>
-                        <p style={{ color: "#aaa", fontSize: 12, marginBottom: 16 }}>
-                          {person.months} months tracked
-                        </p>
-                        <div style={styles.personTotalsRow}>
-                          <div style={styles.personTotalCard}>
-                            <p style={styles.totalLabel}>Income</p>
-                            <p style={{ ...styles.personTotalAmount, color }}>${Math.round(person.income).toLocaleString()}</p>
-                          </div>
-                          <div style={styles.personTotalCard}>
-                            <p style={styles.totalLabel}>Spending</p>
-                            <p style={{ ...styles.personTotalAmount, color: "#e05c5c" }}>${Math.round(person.spending).toLocaleString()}</p>
-                          </div>
-                          <div style={styles.personTotalCard}>
-                            <p style={styles.totalLabel}>Saved</p>
-                            <p style={{ ...styles.personTotalAmount, color: "#2ecc71" }}>${Math.round(person.savings).toLocaleString()}</p>
+                  <div style={styles.householdGrid}>
+                    {householdYear.by_person.map((person, idx) => {
+                      const color = PERSON_COLORS[idx % PERSON_COLORS.length];
+                      return (
+                        <div key={person.person_name} style={styles.card}>
+                          <h2 style={{ ...styles.cardTitle, color }}>{person.person_name}</h2>
+                          <p style={{ color: "#aaa", fontSize: 12, marginBottom: 16 }}>
+                            {person.months} months tracked
+                          </p>
+                          <div style={styles.personTotalsRow}>
+                            <div style={styles.personTotalCard}>
+                              <p style={styles.totalLabel}>Income</p>
+                              <p style={{ ...styles.personTotalAmount, color }}>${Math.round(person.income).toLocaleString()}</p>
+                            </div>
+                            <div style={styles.personTotalCard}>
+                              <p style={styles.totalLabel}>Spending</p>
+                              <p style={{ ...styles.personTotalAmount, color: "#e05c5c" }}>${Math.round(person.spending).toLocaleString()}</p>
+                            </div>
+                            <div style={styles.personTotalCard}>
+                              <p style={styles.totalLabel}>Saved</p>
+                              <p style={{ ...styles.personTotalAmount, color: "#2ecc71" }}>${Math.round(person.savings).toLocaleString()}</p>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div style={styles.card}>
-                  <h2 style={styles.cardTitle}>Spending by Category — {householdYear.year}</h2>
-                  <ResponsiveContainer width="100%" height={300}>
-                    <BarChart
-                      data={Object.entries(householdYear.by_category).map(([name, value]) => ({ name, amount: Math.round(value) }))}
-                      style={{ cursor: "pointer" }}
-                    >
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="name" />
-                      <YAxis />
-                      <Tooltip formatter={(value) => `$${value.toLocaleString()}`} />
-                      <Bar dataKey="amount" onClick={(data) => setYearCategoryFilter(prev => prev === data.name ? null : data.name)}>
-                        {Object.entries(householdYear.by_category).map(([name]) => (
-                          <Cell key={name}
-                            fill={CATEGORY_COLORS[name] || "#95a5a6"}
-                            opacity={yearCategoryFilter && yearCategoryFilter !== name ? 0.3 : 1}
-                          />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-
-                  <table style={{ ...styles.table, marginTop: 20 }}>
-                    <thead>
-                      <tr>
-                        <th style={styles.th}>Category</th>
-                        <th style={styles.th}>Total Spent</th>
-                        <th style={styles.th}>Monthly Avg</th>
-                        <th style={styles.th}>% of Spending</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {Object.entries(householdYear.by_category).map(([cat, amt], i) => (
-                        <tr key={cat} style={i % 2 === 0 ? styles.rowEven : styles.rowOdd}>
-                          <td style={styles.td}>
-                            <span style={{ ...styles.categoryBadge, background: CATEGORY_COLORS[cat] || "#95a5a6" }}>{cat}</span>
-                          </td>
-                          <td style={{ ...styles.td, fontWeight: "bold" }}>${Math.round(amt).toLocaleString()}</td>
-                          <td style={{ ...styles.td, color: "#888" }}>
-                            ${Math.round(amt / (householdYear.months_tracked || 1)).toLocaleString()}
-                          </td>
-                          <td style={{ ...styles.td, color: "#4f86c6", fontWeight: "bold" }}>
-                            {householdYear.total_spending > 0 ? Math.round(amt / householdYear.total_spending * 100) : 0}%
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* Year transactions table */}
-                <div style={styles.card}>
-                  <div style={styles.tableHeader}>
-                    <h2 style={styles.cardTitle}>
-                      {yearCategoryFilter ? `Transactions — ${yearCategoryFilter}` : "All Transactions"}
-                    </h2>
-                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      {yearCategoryFilter && (
-                        <button onClick={() => setYearCategoryFilter(null)} style={styles.clearFilter}>
-                          ✕ Clear filter
-                        </button>
-                      )}
-                      {(yearTableSearch || yearPersonFilter || yearAccountFilter || yearStatusFilter !== "all" || yearSort.col) && (
-                        <button onClick={() => {
-                          setYearTableSearch("");
-                          setYearPersonFilter("");
-                          setYearAccountFilter("");
-                          setYearStatusFilter("all");
-                          setYearSort({ col: null, dir: "asc" });
-                        }} style={styles.clearFilter}>
-                          ↺ Reset filters
-                        </button>
-                      )}
-                    </div>
+                      );
+                    })}
                   </div>
 
-                  <table style={styles.table}>
-                    <thead>
-                      <tr>
-                        <th style={styles.th}>
-                          <div style={styles.thContent}>
-                            Date
-                            <button onClick={() => setYearSort(prev =>
-                              prev.col === "date"
-                                ? { col: "date", dir: prev.dir === "asc" ? "desc" : "asc" }
-                                : { col: "date", dir: "desc" }
-                            )} style={styles.sortButton}>
-                              {yearSort.col === "date" ? (yearSort.dir === "asc" ? "↑" : "↓") : "↕"}
-                            </button>
-                          </div>
-                        </th>
-                        <th style={styles.th}>
-                          <div style={styles.thContent}>Person</div>
-                          <select value={yearPersonFilter} onChange={(e) => setYearPersonFilter(e.target.value)} style={styles.filterSelect}>
-                            <option value="">All</option>
-                            {people.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
-                          </select>
-                        </th>
-                        <th style={styles.th}>
-                          <div style={styles.thContent}>Description</div>
-                          <input type="text" placeholder="Search..." value={yearTableSearch}
-                            onChange={(e) => setYearTableSearch(e.target.value)} style={styles.filterInput} />
-                        </th>
-                        <th style={styles.th}>
-                          <div style={styles.thContent}>Account</div>
-                          <select value={yearAccountFilter} onChange={(e) => setYearAccountFilter(e.target.value)} style={styles.filterSelect}>
-                            <option value="">All</option>
-                            {[...new Set(yearTransactions.map(t => t.account).filter(Boolean))].map(acc => (
-                              <option key={acc} value={acc}>{acc}</option>
-                            ))}
-                          </select>
-                        </th>
-                        <th style={styles.th}>
-                          <div style={styles.thContent}>Category</div>
-                          <select value={yearTableCategoryFilter} onChange={(e) => setYearTableCategoryFilter(e.target.value)} style={styles.filterSelect}>
-                            <option value="">All</option>
-                            {["Food", "Transport", "Shopping", "Subscriptions", "Utilities",
-                              "Healthcare", "Entertainment", "Income", "Investment", "Housing", "Travel", "Other"].map(cat => (
-                                <option key={cat} value={cat}>{cat}</option>
-                              ))}
-                          </select>
-                        </th>
-                        <th style={styles.th}>
-                          <div style={styles.thContent}>
-                            Amount
-                            <button onClick={() => setYearSort(prev =>
-                              prev.col === "amount"
-                                ? { col: "amount", dir: prev.dir === "asc" ? "desc" : "asc" }
-                                : { col: "amount", dir: "desc" }
-                            )} style={styles.sortButton}>
-                              {yearSort.col === "amount" ? (yearSort.dir === "asc" ? "↑" : "↓") : "↕"}
-                            </button>
-                          </div>
-                        </th>
-                        <th style={styles.th}>
-                          <div style={styles.thContent}>Status</div>
-                          <select value={yearStatusFilter} onChange={(e) => setYearStatusFilter(e.target.value)} style={styles.filterSelect}>
-                            <option value="all">All</option>
-                            <option value="active">Active</option>
-                            <option value="excluded">Excluded</option>
-                          </select>
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(() => {
-                        let txs = yearTransactions
-                          .filter(t => yearCategoryFilter ? t.category === yearCategoryFilter : true)
-                          .filter(t => yearTableSearch ? t.description?.toLowerCase().includes(yearTableSearch.toLowerCase()) : true)
-                          .filter(t => yearPersonFilter ? t.person_name === yearPersonFilter : true)
-                          .filter(t => yearAccountFilter ? t.account === yearAccountFilter : true)
-                          .filter(t => yearTableCategoryFilter ? t.category === yearTableCategoryFilter : true)
-                          .filter(t => yearStatusFilter === "active" ? !t.excluded : yearStatusFilter === "excluded" ? t.excluded : true);
+                  {/* Household Insights */}
+                  <div style={styles.card}>
+                    <div style={styles.tableHeader}>
+                      <div>
+                        <h2 style={styles.cardTitle}>Couple's Financial Insights — {householdYear.year}</h2>
+                        {householdInsightsDate && (
+                          <p style={{ fontSize: 11, color: "#aaa", margin: "4px 0 0 0" }}>
+                            Last generated {new Date(householdInsightsDate).toLocaleDateString("default", {
+                              month: "short", day: "numeric", year: "numeric"
+                            })}
+                          </p>
+                        )}
+                      </div>
+                      <button
+                        onClick={generateHouseholdInsights}
+                        disabled={generatingHouseholdInsights}
+                        style={generatingHouseholdInsights ? styles.pillButtonDisabled : styles.pillButton}
+                      >
+                        {generatingHouseholdInsights ? "↻ Generating..." : "✦ Generate Insights"}
+                      </button>
+                    </div>
 
-                        if (yearSort.col === "date") {
-                          txs = [...txs].sort((a, b) =>
-                            yearSort.dir === "asc" ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date)
-                          );
-                        } else if (yearSort.col === "amount") {
-                          txs = [...txs].sort((a, b) =>
-                            yearSort.dir === "asc" ? a.amount - b.amount : b.amount - a.amount
-                          );
-                        }
+                    {generatingHouseholdInsights && (
+                      <div style={styles.insightsLoadingBar}>
+                        <div style={styles.insightsLoadingFill} />
+                      </div>
+                    )}
 
-                        return txs.map((t, i) => (
-                          <tr key={i} style={{
-                            ...(i % 2 === 0 ? styles.rowEven : styles.rowOdd),
-                            opacity: t.excluded ? 0.4 : 1
-                          }}>
-                            <td style={styles.td}>{t.date}</td>
-                            <td style={styles.td}>
+                    {householdInsights ? (
+                      <>
+                        <p style={styles.summary}>{householdInsights.summary}</p>
+
+                        {/* Doing well */}
+                        <div style={styles.insightBox}>
+                          <p style={styles.insightLabel}>What you're doing well</p>
+                          {householdInsights.doing_well?.map((item, i) => (
+                            <div key={i} style={{ display: "flex", gap: 10, marginBottom: 8, alignItems: "flex-start" }}>
+                              <span style={{ color: "#2ecc71", fontWeight: "bold", fontSize: 16 }}>✓</span>
+                              <p style={{ margin: 0, fontSize: 14 }}>{item}</p>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Spending insights */}
+                        <p style={styles.insightLabel}>Spending Breakdown</p>
+                        {householdInsights.spending_insights?.map((item, i) => (
+                          <div key={i} style={{ ...styles.insightBox, marginBottom: 12 }}>
+                            <p style={{ fontWeight: "700", fontSize: 14, margin: "0 0 6px 0", color: "#1a1a2e" }}>
                               <span style={{
-                                ...styles.accountBadge,
-                                background: t.person_name === people[0]?.name ? "#e8f0fe" : "#fce8f0",
-                                color: t.person_name === people[0]?.name ? "#4f86c6" : "#e05c5c",
-                                border: "none"
-                              }}>
-                                {t.person_name}
-                              </span>
-                            </td>
+                                ...styles.categoryBadge,
+                                background: CATEGORY_COLORS[item.category] || "#95a5a6",
+                                marginRight: 8
+                              }}>{item.category}</span>
+                            </p>
+                            <p style={{ margin: "0 0 6px 0", fontSize: 14, color: "#444" }}>{item.insight}</p>
+                            <p style={{ margin: 0, fontSize: 13, color: "#4f86c6", fontWeight: "600" }}>
+                              💡 {item.action}
+                            </p>
+                          </div>
+                        ))}
+
+                        {/* Investment tips */}
+                        <div style={styles.insightBox}>
+                          <p style={styles.insightLabel}>Investment Tips</p>
+                          {householdInsights.investment_tips?.map((tip, i) => (
+                            <div key={i} style={{ display: "flex", gap: 12, marginBottom: 10, alignItems: "flex-start" }}>
+                              <span style={styles.recNumber}>{i + 1}</span>
+                              <p style={{ margin: 0, fontSize: 14 }}>{tip}</p>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Savings opportunities */}
+                        <p style={styles.insightLabel}>Savings Opportunities</p>
+                        {householdInsights.savings_opportunities?.map((opp, i) => (
+                          <div key={i} style={{ ...styles.insightBox, marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                            <div style={{ flex: 1 }}>
+                              <p style={{ fontWeight: "700", fontSize: 14, margin: "0 0 4px 0" }}>{opp.title}</p>
+                              <p style={{ margin: 0, fontSize: 13, color: "#666" }}>{opp.description}</p>
+                            </div>
+                            <div style={{ textAlign: "right", marginLeft: 16, flexShrink: 0 }}>
+                              <p style={{ margin: 0, fontSize: 11, color: "#aaa" }}>Est. monthly savings</p>
+                              <p style={{ margin: 0, fontSize: 18, fontWeight: "800", color: "#2ecc71" }}>
+                                +${opp.estimated_monthly_savings?.toLocaleString()}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+
+                        {/* Goals */}
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 8 }}>
+                          <div style={{ ...styles.insightBox, background: "linear-gradient(135deg, #f0f6ff 0%, #e8f4ff 100%)" }}>
+                            <p style={{ ...styles.insightLabel, color: "#4f86c6" }}>Monthly Goal</p>
+                            <p style={{ margin: 0, fontSize: 14, fontWeight: "600" }}>{householdInsights.monthly_goal}</p>
+                          </div>
+                          <div style={{ ...styles.insightBox, background: "linear-gradient(135deg, #f0fff4 0%, #e8f8ee 100%)" }}>
+                            <p style={{ ...styles.insightLabel, color: "#2ecc71" }}>Yearly Goal</p>
+                            <p style={{ margin: 0, fontSize: 14, fontWeight: "600" }}>{householdInsights.yearly_goal}</p>
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <p style={styles.noPeopleMsg}>
+                        Click Generate Insights to get personalized financial advice for {householdYear.year}.
+                      </p>
+                    )}
+                  </div>
+
+                  <div style={styles.card}>
+                    <h2 style={styles.cardTitle}>Spending by Category — {householdYear.year}</h2>
+                    <ResponsiveContainer width="100%" height={300}>
+                      <BarChart
+                        data={Object.entries(householdYear.by_category).map(([name, value]) => ({ name, amount: Math.round(value) }))}
+                        style={{ cursor: "pointer" }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="name" />
+                        <YAxis />
+                        <Tooltip formatter={(value) => `$${value.toLocaleString()}`} />
+                        <Bar dataKey="amount" onClick={(data) => setYearCategoryFilter(prev => prev === data.name ? null : data.name)}>
+                          {Object.entries(householdYear.by_category).map(([name]) => (
+                            <Cell key={name}
+                              fill={CATEGORY_COLORS[name] || "#95a5a6"}
+                              opacity={yearCategoryFilter && yearCategoryFilter !== name ? 0.3 : 1}
+                            />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+
+                    <table style={{ ...styles.table, marginTop: 20 }}>
+                      <thead>
+                        <tr>
+                          <th style={styles.th}>Category</th>
+                          <th style={styles.th}>Total Spent</th>
+                          <th style={styles.th}>Monthly Avg</th>
+                          <th style={styles.th}>% of Spending</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(householdYear.by_category).map(([cat, amt], i) => (
+                          <tr key={cat} style={i % 2 === 0 ? styles.rowEven : styles.rowOdd}>
                             <td style={styles.td}>
-                              <div style={{ textDecoration: t.excluded ? "line-through" : "none" }}>
-                                {t.description}
-                              </div>
-                              {t.note && t.note !== t.description && (
-                                <div style={styles.noteText}>{t.note}</div>
-                              )}
+                              <span style={{ ...styles.categoryBadge, background: CATEGORY_COLORS[cat] || "#95a5a6" }}>{cat}</span>
                             </td>
-                            <td style={styles.td}>
-                              <span style={styles.accountBadge}>{t.account || "Unknown"}</span>
+                            <td style={{ ...styles.td, fontWeight: "bold" }}>${Math.round(amt).toLocaleString()}</td>
+                            <td style={{ ...styles.td, color: "#888" }}>
+                              ${Math.round(amt / (householdYear.months_tracked || 1)).toLocaleString()}
                             </td>
-                            <td style={styles.td}>
-                              {yearEditingCategory === String(t.statement_id) + "-" + String(t.original_index) ? (
-                                <select
-                                  autoFocus
-                                  defaultValue={t.category}
-                                  onChange={(e) => updateYearTransactionCategory(t.statement_id, t.original_index, e.target.value)}
-                                  onBlur={() => setYearEditingCategory(null)}
-                                  style={styles.categorySelect}
-                                >
-                                  {["Food", "Transport", "Shopping", "Subscriptions", "Utilities",
-                                    "Healthcare", "Entertainment", "Income", "Investment", "Housing", "Travel", "Other"].map(cat => (
-                                      <option key={cat} value={cat}>{cat}</option>
-                                    ))}
-                                </select>
-                              ) : (
-                                <span
-                                  style={{
-                                    ...styles.categoryBadge,
-                                    background: CATEGORY_COLORS[t.category] || "#95a5a6",
-                                    cursor: "pointer"
-                                  }}
-                                  onClick={() => setYearEditingCategory(String(t.statement_id) + "-" + String(t.original_index))}
-                                  title="Click to edit category"
-                                >
-                                  {t.category} ✎
-                                </span>
-                              )}
-                            </td>
-                            <td style={{
-                              ...styles.td,
-                              color: t.amount < 0 ? "#e05c5c" : "#2ecc71",
-                              fontWeight: "bold"
-                            }}>
-                              {t.amount < 0 ? "-" : "+"}${Math.abs(t.amount).toFixed(2)}
-                            </td>
-                            <td style={styles.td}>
-                              <button
-                                onClick={() => toggleYearTransactionExcluded(t.statement_id, t.original_index, t.excluded)}
-                                style={{
-                                  ...styles.excludeButton,
-                                  background: t.auto_excluded ? "#f0a500" : t.excluded ? "#e05c5c" : "#f0f4f8",
-                                  color: t.auto_excluded || t.excluded ? "white" : "#888",
-                                }}
-                              >
-                                {t.auto_excluded ? "Auto-excluded" : t.excluded ? "Excluded" : "Exclude"}
-                              </button>
+                            <td style={{ ...styles.td, color: "#4f86c6", fontWeight: "bold" }}>
+                              {householdYear.total_spending > 0 ? Math.round(amt / householdYear.total_spending * 100) : 0}%
                             </td>
                           </tr>
-                        ));
-                      })()}
-                    </tbody>
-                  </table>
-                  {yearTransactions
-                    .filter(t => yearCategoryFilter ? t.category === yearCategoryFilter : true)
-                    .filter(t => yearTableSearch ? t.description?.toLowerCase().includes(yearTableSearch.toLowerCase()) : true)
-                    .length === 0 && (
-                      <p style={styles.noTransactions}>No transactions found.</p>
-                    )}
-                </div>
-              </>
-            )}
-
-            {/* Single month view */}
-            {householdMonth && !householdMonth.startsWith("year-") && householdMonth !== "rolling" && householdData && householdData.people.length > 0 && (
-              <>
-                <div style={styles.card}>
-                  <h2 style={styles.cardTitle}>Combined Household — {formatMonth(householdData.month)}</h2>
-                  <div style={styles.totalsRow}>
-                    {[
-                      { label: "Total Income", value: householdData.combined.income, color: "#1a1a2e" },
-                      { label: "Total Spending", value: householdData.combined.spending, color: "#e05c5c" },
-                      { label: "Total Savings", value: householdData.combined.savings, color: "#2ecc71" },
-                    ].map(({ label, value, color }) => (
-                      <div key={label} style={styles.totalCard}>
-                        <p style={styles.totalLabel}>{label}</p>
-                        <p style={{ ...styles.totalAmount, color }}>${(value || 0).toLocaleString()}</p>
-                      </div>
-                    ))}
-                    <div style={styles.totalCard}>
-                      <p style={styles.totalLabel}>Household Rate</p>
-                      <p style={{ ...styles.totalAmount, color: "#4f86c6" }}>{householdData.combined.savings_rate}%</p>
-                    </div>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
-                </div>
 
-                <div style={styles.householdGrid}>
-                  {householdData.people.map((person, idx) => {
-                    const color = PERSON_COLORS[idx % PERSON_COLORS.length];
-                    const personChartData = Object.entries(person.categories || {}).map(([name, value]) => ({ name, amount: value }));
-                    return (
-                      <div key={person.person_id} style={styles.card}>
-                        <h2 style={{ ...styles.cardTitle, color }}>{person.person_name}</h2>
-                        {person.accounts?.length > 0 && (
-                          <p style={styles.accountsLine}>Accounts: {person.accounts.join(", ")}</p>
+                  {/* Year transactions table */}
+                  <div style={styles.card}>
+                    <div style={styles.tableHeader}>
+                      <h2 style={styles.cardTitle}>
+                        {yearCategoryFilter ? `Transactions — ${yearCategoryFilter}` : "All Transactions"}
+                      </h2>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        {yearCategoryFilter && (
+                          <button onClick={() => setYearCategoryFilter(null)} style={styles.clearFilter}>
+                            ✕ Clear filter
+                          </button>
                         )}
-                        <div style={styles.personTotalsRow}>
-                          <div style={styles.personTotalCard}>
-                            <p style={styles.totalLabel}>Income</p>
-                            <p style={{ ...styles.personTotalAmount, color }}>${(person.income || 0).toLocaleString()}</p>
-                          </div>
-                          <div style={styles.personTotalCard}>
-                            <p style={styles.totalLabel}>Spending</p>
-                            <p style={{ ...styles.personTotalAmount, color: "#e05c5c" }}>${(person.spending || 0).toLocaleString()}</p>
-                          </div>
-                          <div style={styles.personTotalCard}>
-                            <p style={styles.totalLabel}>Savings</p>
-                            <p style={{ ...styles.personTotalAmount, color: "#2ecc71" }}>${(person.savings || 0).toLocaleString()}</p>
-                          </div>
-                        </div>
-                        <ResponsiveContainer width="100%" height={200}>
-                          <BarChart data={personChartData}>
-                            <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-                            <YAxis tick={{ fontSize: 11 }} />
-                            <Tooltip formatter={(value) => `$${value.toFixed(2)}`} />
-                            <Bar dataKey="amount">
-                              {personChartData.map((entry) => (
-                                <Cell key={entry.name} fill={CATEGORY_COLORS[entry.name] || "#95a5a6"} />
-                              ))}
-                            </Bar>
-                          </BarChart>
-                        </ResponsiveContainer>
+                        {(yearTableSearch || yearPersonFilter || yearAccountFilter || yearStatusFilter !== "all" || yearSort.col) && (
+                          <button onClick={() => {
+                            setYearTableSearch("");
+                            setYearPersonFilter("");
+                            setYearAccountFilter("");
+                            setYearStatusFilter("all");
+                            setYearSort({ col: null, dir: "asc" });
+                          }} style={styles.clearFilter}>
+                            ↺ Reset filters
+                          </button>
+                        )}
                       </div>
-                    );
-                  })}
+                    </div>
+
+                    <table style={styles.table}>
+                      <thead>
+                        <tr>
+                          <th style={styles.th}>
+                            <div style={styles.thContent}>
+                              Date
+                              <button onClick={() => setYearSort(prev =>
+                                prev.col === "date"
+                                  ? { col: "date", dir: prev.dir === "asc" ? "desc" : "asc" }
+                                  : { col: "date", dir: "desc" }
+                              )} style={styles.sortButton}>
+                                {yearSort.col === "date" ? (yearSort.dir === "asc" ? "↑" : "↓") : "↕"}
+                              </button>
+                            </div>
+                          </th>
+                          <th style={styles.th}>
+                            <div style={styles.thContent}>Person</div>
+                            <select value={yearPersonFilter} onChange={(e) => setYearPersonFilter(e.target.value)} style={styles.filterSelect}>
+                              <option value="">All</option>
+                              {people.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
+                            </select>
+                          </th>
+                          <th style={styles.th}>
+                            <div style={styles.thContent}>Description</div>
+                            <input type="text" placeholder="Search..." value={yearTableSearch}
+                              onChange={(e) => setYearTableSearch(e.target.value)} style={styles.filterInput} />
+                          </th>
+                          <th style={styles.th}>
+                            <div style={styles.thContent}>Account</div>
+                            <select value={yearAccountFilter} onChange={(e) => setYearAccountFilter(e.target.value)} style={styles.filterSelect}>
+                              <option value="">All</option>
+                              {[...new Set(yearTransactions.map(t => t.account).filter(Boolean))].map(acc => (
+                                <option key={acc} value={acc}>{acc}</option>
+                              ))}
+                            </select>
+                          </th>
+                          <th style={styles.th}>
+                            <div style={styles.thContent}>Category</div>
+                            <select value={yearTableCategoryFilter} onChange={(e) => setYearTableCategoryFilter(e.target.value)} style={styles.filterSelect}>
+                              <option value="">All</option>
+                              {["Food", "Groceries", "Transport", "Shopping", "Subscriptions", "Utilities",
+                                "Healthcare", "Entertainment", "Income", "Investment", "Housing", "Travel", "Fitness", "Other"].map(cat => (
+                                  <option key={cat} value={cat}>{cat}</option>
+                                ))}
+                            </select>
+                          </th>
+                          <th style={styles.th}>
+                            <div style={styles.thContent}>
+                              Amount
+                              <button onClick={() => setYearSort(prev =>
+                                prev.col === "amount"
+                                  ? { col: "amount", dir: prev.dir === "asc" ? "desc" : "asc" }
+                                  : { col: "amount", dir: "desc" }
+                              )} style={styles.sortButton}>
+                                {yearSort.col === "amount" ? (yearSort.dir === "asc" ? "↑" : "↓") : "↕"}
+                              </button>
+                            </div>
+                          </th>
+                          <th style={styles.th}>
+                            <div style={styles.thContent}>Status</div>
+                            <select value={yearStatusFilter} onChange={(e) => setYearStatusFilter(e.target.value)} style={styles.filterSelect}>
+                              <option value="all">All</option>
+                              <option value="active">Active</option>
+                              <option value="excluded">Excluded</option>
+                            </select>
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(() => {
+                          let txs = yearTransactions
+                            .filter(t => yearCategoryFilter ? t.category === yearCategoryFilter : true)
+                            .filter(t => yearTableSearch ? t.description?.toLowerCase().includes(yearTableSearch.toLowerCase()) : true)
+                            .filter(t => yearPersonFilter ? t.person_name === yearPersonFilter : true)
+                            .filter(t => yearAccountFilter ? t.account === yearAccountFilter : true)
+                            .filter(t => yearTableCategoryFilter ? t.category === yearTableCategoryFilter : true)
+                            .filter(t => yearStatusFilter === "active" ? !t.excluded : yearStatusFilter === "excluded" ? t.excluded : true);
+
+                          if (yearSort.col === "date") {
+                            txs = [...txs].sort((a, b) =>
+                              yearSort.dir === "asc" ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date)
+                            );
+                          } else if (yearSort.col === "amount") {
+                            txs = [...txs].sort((a, b) =>
+                              yearSort.dir === "asc" ? a.amount - b.amount : b.amount - a.amount
+                            );
+                          }
+
+                          return txs.map((t, i) => (
+                            <tr key={i} style={{
+                              ...(i % 2 === 0 ? styles.rowEven : styles.rowOdd),
+                              opacity: t.excluded ? 0.4 : 1
+                            }}>
+                              <td style={styles.td}>{t.date}</td>
+                              <td style={styles.td}>
+                                <span style={{
+                                  ...styles.accountBadge,
+                                  background: t.person_name === people[0]?.name ? "#e8f0fe" : "#fce8f0",
+                                  color: t.person_name === people[0]?.name ? "#4f86c6" : "#e05c5c",
+                                  border: "none"
+                                }}>
+                                  {t.person_name}
+                                </span>
+                              </td>
+                              <td style={styles.td}>
+                                <div style={{ textDecoration: t.excluded ? "line-through" : "none" }}>
+                                  {t.description}
+                                </div>
+                                {t.note && t.note !== t.description && (
+                                  <div style={styles.noteText}>{t.note}</div>
+                                )}
+                              </td>
+                              <td style={styles.td}>
+                                <span style={styles.accountBadge}>{t.account || "Unknown"}</span>
+                              </td>
+                              <td style={styles.td}>
+                                {yearEditingCategory === String(t.statement_id) + "-" + String(t.original_index) ? (
+                                  <select
+                                    autoFocus
+                                    defaultValue={t.category}
+                                    onChange={(e) => updateYearTransactionCategory(t.statement_id, t.original_index, e.target.value)}
+                                    onBlur={() => setYearEditingCategory(null)}
+                                    style={styles.categorySelect}
+                                  >
+                                    {["Food", "Groceries", "Transport", "Shopping", "Subscriptions", "Utilities",
+                                      "Healthcare", "Entertainment", "Income", "Investment", "Housing", "Travel", "Fitness", "Other"].map(cat => (
+                                        <option key={cat} value={cat}>{cat}</option>
+                                      ))}
+                                  </select>
+                                ) : (
+                                  <span
+                                    style={{
+                                      ...styles.categoryBadge,
+                                      background: CATEGORY_COLORS[t.category] || "#95a5a6",
+                                      cursor: "pointer"
+                                    }}
+                                    onClick={() => setYearEditingCategory(String(t.statement_id) + "-" + String(t.original_index))}
+                                    title="Click to edit category"
+                                  >
+                                    {t.category} ✎
+                                  </span>
+                                )}
+                              </td>
+                              <td style={{
+                                ...styles.td,
+                                color: t.amount < 0 ? "#e05c5c" : "#2ecc71",
+                                fontWeight: "bold"
+                              }}>
+                                {t.amount < 0 ? "-" : "+"}${Math.abs(t.amount).toFixed(2)}
+                              </td>
+                              <td style={styles.td}>
+                                <button
+                                  onClick={() => toggleYearTransactionExcluded(t.statement_id, t.original_index, t.excluded)}
+                                  style={{
+                                    ...styles.excludeButton,
+                                    background: t.auto_excluded ? "#f0a500" : t.excluded ? "#e05c5c" : "#f0f4f8",
+                                    color: t.auto_excluded || t.excluded ? "white" : "#888",
+                                  }}
+                                >
+                                  {t.auto_excluded ? "Auto-excluded" : t.excluded ? "Excluded" : "Exclude"}
+                                </button>
+                              </td>
+                            </tr>
+                          ));
+                        })()}
+                      </tbody>
+                    </table>
+                    {yearTransactions
+                      .filter(t => yearCategoryFilter ? t.category === yearCategoryFilter : true)
+                      .filter(t => yearTableSearch ? t.description?.toLowerCase().includes(yearTableSearch.toLowerCase()) : true)
+                      .length === 0 && (
+                        <p style={styles.noTransactions}>No transactions found.</p>
+                      )}
+                  </div>
+                </>
+              ) : (
+                <div style={styles.card}>
+                  <p style={styles.noPeopleMsg}>Loading household data...</p>
                 </div>
-
-                {householdData.people.length === 1 && (
-                  <p style={styles.householdHint}>
-                    Only {householdData.people[0].person_name} has statements for this month.
-                  </p>
-                )}
-              </>
-            )}
-
-            {householdMonth && !householdMonth.startsWith("year-") && householdMonth !== "rolling" && (!householdData || householdData.people.length === 0) && (
-              <div style={styles.card}>
-                <p style={styles.noPeopleMsg}>No statements found for {formatMonth(householdMonth)}.</p>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -1993,5 +1987,30 @@ const styles = {
     color: "#4f86c6",
     marginTop: 8,
     fontStyle: "italic",
+  },
+  yearSidebar: {
+    width: 100,
+    flexShrink: 0,
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    paddingTop: 8,
+  },
+  yearSidebarTitle: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#aaa",
+    textTransform: "uppercase",
+    letterSpacing: "1px",
+    margin: "0 0 8px 0",
+  },
+  yearButton: {
+    border: "1px solid #ddd",
+    borderRadius: 8,
+    padding: "10px 0",
+    cursor: "pointer",
+    fontSize: 14,
+    width: "100%",
+    transition: "all 0.15s",
   },
 };

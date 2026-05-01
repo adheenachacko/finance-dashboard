@@ -5,8 +5,10 @@ from pypdf import PdfReader
 from anthropic import Anthropic
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
+from datetime import datetime
 from models import Statement, Person, User, create_tables, get_db
 from auth import hash_password, verify_password, create_access_token, get_current_user
+from models import Statement, Person, User, ChatMessage, HouseholdInsight, create_tables, get_db
 import io
 import json
 import os
@@ -210,12 +212,15 @@ Return a JSON array with this exact structure, nothing else:
   {{"index": 0, "category": "Food"}}
 ]
 
-Category must be one of exactly these: Food, Transport, Shopping, Subscriptions, Utilities, Healthcare, Entertainment, Income, Investment, Housing, Travel, Other
+Category must be one of exactly these: Food, Groceries, Transport, Shopping, Subscriptions, Utilities, Healthcare, Entertainment, Income, Investment, Housing, Travel, Fitness, Other
 
 Rules:
 - Rent payments, mortgage payments, and housing-related expenses should be categorized as Housing
 - Flights, hotels, Airbnb = Travel
 - Uber, Lyft, gas, parking = Transport
+- Grocery stores, supermarkets = Groceries
+- Restaurants, cafes, bars, takeout = Food
+- ClassPass, gym, dance, fitness = Fitness
 - Positive amounts are money received — if someone paid you back for food, still categorize as Food
 - Negative amounts are money sent
 - Use the note to determine category
@@ -272,8 +277,10 @@ Return a JSON object with this exact structure, nothing else:
 
 Rules:
 - amount is negative for spending, positive for income/deposits
-- category must be one of exactly these: Food, Transport, Shopping, Subscriptions, Utilities, Healthcare, Entertainment, Income, Investment, Housing, Travel, Other
-- Flights, hotels, Airbnb, vacation rentals, and travel-related bookings should be categorized as Travel
+- category must be one of exactly these: Food, Groceries, Transport, Shopping, Subscriptions, Utilities, Healthcare, Entertainment, Income, Investment, Housing, Travel, Fitness, Other
+- Grocery stores like Whole Foods, Trader Joes, Walmart, Target grocery sections = Groceries
+- Food is for restaurants, cafes, takeout, delivery (Uber Eats, DoorDash, Seamless)
+- ClassPass, gym memberships, dance classes, fitness studios, SoulCycle = Fitness- Flights, hotels, Airbnb, vacation rentals, and travel-related bookings should be categorized as Travel
 - Local transport like Uber, Lyft, subway, PATH, parking = Transport
 - Travel is for trips and accommodation, Transport is for daily commuting
 - Rent payments, mortgage payments, and housing-related expenses should be categorized as Housing
@@ -1076,6 +1083,162 @@ async def get_household_year_transactions(
     # Sort by date descending
     all_transactions.sort(key=lambda x: x.get("date", ""), reverse=True)
     return all_transactions
+
+@app.post("/statements/{statement_id}/recalculate")
+async def recalculate_totals(
+    statement_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    statement = db.query(Statement).filter(Statement.id == statement_id).first()
+    if not statement:
+        raise HTTPException(status_code=404, detail="Statement not found")
+
+    result = calculate_totals(statement.transactions)
+    
+    totals = dict(statement.totals)
+    totals.update({
+        "income": result["income"],
+        "spending": result["spending"],
+        "savings": result["savings"],
+        "invested": result["invested"],
+        "total_saved": result["total_saved"],
+        "savings_rate": result["savings_rate"],
+        "categories": result["categories"]
+    })
+    statement.totals = totals
+    flag_modified(statement, "totals")
+    db.commit()
+    db.refresh(statement)
+
+    return {"totals": statement.totals}
+
+@app.post("/household-year/{year}/insights")
+async def generate_household_insights(
+    year: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    people = db.query(Person).filter(Person.user_id == current_user.id).all()
+
+    year_data = {"year": year, "total_income": 0, "total_spending": 0,
+                 "total_savings": 0, "total_invested": 0, "by_person": [], "by_category": {}}
+
+    for person in people:
+        statements = db.query(Statement).filter(
+            Statement.person_id == person.id,
+            Statement.month.like(f"{year}-%")
+        ).order_by(Statement.month).all()
+
+        person_data = {"name": person.name, "income": 0, "spending": 0,
+                       "savings": 0, "invested": 0, "months": len(statements)}
+
+        for s in statements:
+            person_data["income"] += s.totals.get("income", 0)
+            person_data["spending"] += s.totals.get("spending", 0)
+            person_data["savings"] += s.totals.get("savings", 0)
+            person_data["invested"] += s.totals.get("invested", 0)
+            for cat, amt in s.totals.get("categories", {}).items():
+                year_data["by_category"][cat] = year_data["by_category"].get(cat, 0) + amt
+
+        year_data["total_income"] += person_data["income"]
+        year_data["total_spending"] += person_data["spending"]
+        year_data["total_savings"] += person_data["savings"]
+        year_data["total_invested"] += person_data["invested"]
+        year_data["by_person"].append(person_data)
+
+    months_tracked = max((p["months"] for p in year_data["by_person"]), default=1)
+    total = year_data["total_income"] + year_data["total_invested"]
+    savings_rate = round((year_data["total_savings"] + year_data["total_invested"]) / total * 100, 1) if total > 0 else 0
+    avg_monthly_savings = round(year_data["total_savings"] / months_tracked, 2) if months_tracked > 0 else 0
+
+    summary = {
+        **year_data,
+        "savings_rate": savings_rate,
+        "avg_monthly_savings": avg_monthly_savings,
+        "months_tracked": months_tracked,
+        "by_category": {k: round(v, 2) for k, v in sorted(year_data["by_category"].items(), key=lambda x: x[1], reverse=True)}
+    }
+
+    message = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=2000,
+        messages=[{
+            "role": "user",
+            "content": f"""You are a personal finance advisor for a couple. Based on their {year} financial data, provide detailed, actionable insights.
+
+Return a JSON object with this exact structure, nothing else:
+
+{{
+  "summary": "3-4 sentence overview of the couple's financial health this year",
+  "doing_well": ["specific positive 1", "specific positive 2", "specific positive 3"],
+  "spending_insights": [
+    {{"category": "category name", "insight": "specific observation about this spending", "action": "concrete action they can take"}}
+  ],
+  "investment_tips": [
+    "specific investment tip 1 with dollar amounts",
+    "specific investment tip 2 with dollar amounts",
+    "specific investment tip 3 with dollar amounts"
+  ],
+  "savings_opportunities": [
+    {{"title": "opportunity title", "description": "specific way to save more", "estimated_monthly_savings": 200}}
+  ],
+  "monthly_goal": "one specific financial goal for next month with a dollar target",
+  "yearly_goal": "one specific financial goal for next year with a dollar target"
+}}
+
+Be specific — use their actual numbers. Reference each person by name where relevant.
+Spending data:
+{json.dumps(summary, indent=2)}"""
+        }]
+    )
+
+    raw = message.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.strip()
+    insights = json.loads(raw)
+
+    # Save or update insights
+    existing = db.query(HouseholdInsight).filter(
+        HouseholdInsight.user_id == current_user.id,
+        HouseholdInsight.year == year
+    ).first()
+
+    if existing:
+        existing.insights = insights
+        existing.created_at = datetime.utcnow()
+        flag_modified(existing, "insights")
+        db.commit()
+    else:
+        new_insight = HouseholdInsight(
+            user_id=current_user.id,
+            year=year,
+            insights=insights
+        )
+        db.add(new_insight)
+        db.commit()
+
+    return {"insights": insights, "created_at": str(datetime.utcnow())}
+
+
+@app.get("/household-year/{year}/insights")
+async def get_household_insights(
+    year: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    existing = db.query(HouseholdInsight).filter(
+        HouseholdInsight.user_id == current_user.id,
+        HouseholdInsight.year == year
+    ).first()
+
+    if not existing:
+        return {"insights": None, "created_at": None}
+
+    return {"insights": existing.insights, "created_at": str(existing.created_at)}
 
 @app.get("/health")
 async def health():

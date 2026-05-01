@@ -49,6 +49,25 @@ class Statement(Base):
     person = relationship("Person", back_populates="statements")
 
 
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    question = Column(String, nullable=False)
+    answer = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class HouseholdInsight(Base):
+    __tablename__ = "household_insights"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    year = Column(String, nullable=False)
+    insights = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
 def create_tables():
     Base.metadata.create_all(bind=engine)
 
