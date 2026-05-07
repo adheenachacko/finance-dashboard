@@ -180,6 +180,20 @@ export default function App() {
   const [newAccounts, setNewAccounts] = useState([]);
   const [newGoal, setNewGoal] = useState({ name: "", target_amount: "", current_amount: "", target_date: "", color: "#4f86c6" });
   const [netWorthPersonId, setNetWorthPersonId] = useState("");
+  const [coastInputs, setCoastInputs] = useState({
+    yourAge: 27,
+    spouseAge: 30,
+    retirementAge: 55,
+    monthlyRetirementExpenses: 8000,
+    annualReturn: 7,
+    your401k: 1200,
+    spouse401k: 1200,
+    additionalMonthlySavings: 0,
+  });
+  const [annualBudget, setAnnualBudget] = useState({});
+  const [editingBudget, setEditingBudget] = useState(false);
+  const [budgetDraft, setBudgetDraft] = useState({});
+  const [generatingBudget, setGeneratingBudget] = useState(false);
 
   useEffect(() => {
     const token = getToken();
@@ -258,7 +272,42 @@ export default function App() {
       setHouseholdYear(data);
       fetchYearTransactions(year);
       fetchHouseholdInsights(year);
+      fetchBudget(year);
     } catch { console.log("Could not fetch household year"); }
+  };
+
+  const fetchBudget = async (year) => {
+    try {
+      const response = await fetch(`${API}/budgets/${year}`, { headers: authHeaders() });
+      const data = await response.json();
+      setAnnualBudget(data.budgets || {});
+    } catch { console.log("Could not fetch budget"); }
+  };
+
+  const saveBudget = async () => {
+    try {
+      const formData = new FormData();
+      formData.append("budgets", JSON.stringify(budgetDraft));
+      await fetch(`${API}/budgets/${selectedYear}`, {
+        method: "POST", headers: authHeaders(), body: formData
+      });
+      setAnnualBudget(budgetDraft);
+      setEditingBudget(false);
+    } catch { console.log("Could not save budget"); }
+  };
+
+  const recommendBudget = async () => {
+    setGeneratingBudget(true);
+    try {
+      const response = await fetch(`${API}/budgets/${selectedYear}/recommend`, {
+        method: "POST", headers: authHeaders()
+      });
+      const data = await response.json();
+      setBudgetDraft(data.recommended);
+      setEditingBudget(true); // open the edit form so you can see and save
+    } catch (err) {
+      console.log("Error:", err);
+    } finally { setGeneratingBudget(false); }
   };
 
   const fetchHouseholdInsights = async (year) => {
@@ -1612,6 +1661,198 @@ export default function App() {
                     </table>
                   </div>
 
+                  {/* Annual Budget Tracker */}
+                  <div style={styles.card}>
+                    <div style={styles.tableHeader}>
+                      <div>
+                        <h2 style={styles.cardTitle}>Annual Budget — {householdYear.year}</h2>
+                        <p style={{ fontSize: 13, color: "#888", margin: "4px 0 0 0" }}>
+                          Yearly limits per category. Travel and big expenses make more sense annually.
+                        </p>
+                      </div>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        {editingBudget ? (
+                          <>
+                            <button onClick={saveBudget} style={styles.pillButton}>Save Budget</button>
+                            <button onClick={() => setEditingBudget(false)} style={styles.clearFilter}>Cancel</button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => {
+                                setBudgetDraft({ ...annualBudget });
+                                setEditingBudget(true);
+                              }}
+                              style={styles.clearFilter}
+                            >
+                              ✎ Edit Budget
+                            </button>
+                            <button
+                              onClick={recommendBudget}
+                              disabled={generatingBudget}
+                              style={generatingBudget ? styles.pillButtonDisabled : styles.pillButton}
+                            >
+                              {generatingBudget ? "↻ Generating..." : "✦ AI Recommend"}
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {generatingBudget && (
+                      <div style={styles.insightsLoadingBar}>
+                        <div style={styles.insightsLoadingFill} />
+                      </div>
+                    )}
+
+                    {editingBudget && (
+                      <div style={{ background: "#f8f9fa", borderRadius: 12, padding: 20, marginBottom: 20 }}>
+                        <p style={{ fontSize: 13, color: "#888", marginBottom: 16 }}>
+                          Set annual budget limits for each category. Click AI Recommend to get suggestions based on your spending.
+                        </p>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+                          {["Food", "Groceries", "Transport", "Shopping", "Subscriptions",
+                            "Utilities", "Healthcare", "Entertainment", "Housing", "Travel", "Fitness", "Other"].map(cat => (
+                              <div key={cat} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                                <label style={{ fontSize: 12, fontWeight: "600", color: "#555" }}>
+                                  <span style={{
+                                    display: "inline-block", width: 10, height: 10, borderRadius: "50%",
+                                    background: CATEGORY_COLORS[cat] || "#95a5a6", marginRight: 6
+                                  }} />
+                                  {cat}
+                                </label>
+                                <input
+                                  type="number"
+                                  placeholder="No limit"
+                                  value={budgetDraft[cat] || ""}
+                                  onChange={(e) => setBudgetDraft(prev => ({
+                                    ...prev,
+                                    [cat]: e.target.value ? parseFloat(e.target.value) : undefined
+                                  }))}
+                                  style={{ ...styles.pillInput, width: "100%", boxSizing: "border-box" }}
+                                />
+                              </div>
+                            ))}
+                        </div>
+                        <p style={{ fontSize: 11, color: "#aaa", marginTop: 12 }}>
+                          Leave blank for no limit. Amounts are annual totals.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Budget bars */}
+                    {Object.keys(householdYear.by_category || {}).length > 0 ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                        {Object.entries(householdYear.by_category)
+                          .sort((a, b) => b[1] - a[1])
+                          .map(([cat, spent]) => {
+                            const budget = annualBudget[cat];
+                            const hasBudget = budget && budget > 0;
+                            const pct = hasBudget ? Math.min((spent / budget) * 100, 100) : 0;
+                            const overBudget = hasBudget && spent > budget;
+                            const nearBudget = hasBudget && pct >= 80 && !overBudget;
+                            const remaining = hasBudget ? budget - spent : null;
+                            const color = overBudget ? "#e05c5c" : nearBudget ? "#f0a500" : CATEGORY_COLORS[cat] || "#95a5a6";
+
+                            return (
+                              <div key={cat}>
+                                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, alignItems: "center" }}>
+                                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                    <span style={{
+                                      ...styles.categoryBadge,
+                                      background: CATEGORY_COLORS[cat] || "#95a5a6",
+                                      fontSize: 11
+                                    }}>{cat}</span>
+                                    {overBudget && <span style={{ fontSize: 11, color: "#e05c5c", fontWeight: "700" }}>Over budget!</span>}
+                                    {nearBudget && <span style={{ fontSize: 11, color: "#f0a500", fontWeight: "700" }}>Approaching limit</span>}
+                                  </div>
+                                  <div style={{ textAlign: "right" }}>
+                                    <span style={{ fontSize: 14, fontWeight: "700", color: "#1a1a2e" }}>
+                                      ${Math.round(spent).toLocaleString()}
+                                    </span>
+                                    {hasBudget && (
+                                      <span style={{ fontSize: 13, color: "#aaa" }}>
+                                        {" "}/ ${Math.round(budget).toLocaleString()}
+                                      </span>
+                                    )}
+                                    {hasBudget && remaining !== null && (
+                                      <span style={{ fontSize: 11, color: remaining >= 0 ? "#2ecc71" : "#e05c5c", display: "block" }}>
+                                        {remaining >= 0 ? `$${Math.round(remaining).toLocaleString()} remaining` : `$${Math.round(Math.abs(remaining)).toLocaleString()} over`}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* Progress bar */}
+                                <div style={{ background: "#e8ecf0", borderRadius: 50, height: 12, position: "relative" }}>
+                                  <div style={{
+                                    background: color,
+                                    borderRadius: 50,
+                                    height: 12,
+                                    width: hasBudget ? `${pct}%` : "100%",
+                                    opacity: hasBudget ? 1 : 0.3,
+                                    transition: "width 0.5s"
+                                  }} />
+                                  {!hasBudget && (
+                                    <span style={{ position: "absolute", right: 8, top: -1, fontSize: 10, color: "#aaa" }}>
+                                      no limit set
+                                    </span>
+                                  )}
+                                </div>
+
+                                {hasBudget && (
+                                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3 }}>
+                                    <span style={{ fontSize: 10, color: "#aaa" }}>0</span>
+                                    <span style={{ fontSize: 10, color: color, fontWeight: "600" }}>{Math.round(pct)}%</span>
+                                    <span style={{ fontSize: 10, color: "#aaa" }}>${Math.round(budget).toLocaleString()}</span>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                      </div>
+                    ) : (
+                      <p style={styles.noPeopleMsg}>No spending data yet for {householdYear.year}.</p>
+                    )}
+
+                    {/* Summary row */}
+                    {Object.keys(annualBudget).length > 0 && (
+                      <div style={{ marginTop: 20, padding: 16, background: "#f8f9fa", borderRadius: 12, display: "flex", justifyContent: "space-between" }}>
+                        <div>
+                          <p style={{ margin: 0, fontSize: 12, color: "#aaa" }}>Total budgeted</p>
+                          <p style={{ margin: 0, fontSize: 18, fontWeight: "700", color: "#1a1a2e" }}>
+                            ${Object.values(annualBudget).reduce((s, v) => s + (parseFloat(v) || 0), 0).toLocaleString()}
+                          </p>
+                        </div>
+                        <div>
+                          <p style={{ margin: 0, fontSize: 12, color: "#aaa" }}>Total spent YTD</p>
+                          <p style={{ margin: 0, fontSize: 18, fontWeight: "700", color: "#e05c5c" }}>
+                            ${Math.round(Object.values(householdYear.by_category || {}).reduce((s, v) => s + (parseFloat(v) || 0), 0)).toLocaleString()}
+                          </p>
+                        </div>
+                        <div>
+                          <p style={{ margin: 0, fontSize: 12, color: "#aaa" }}>Total remaining</p>
+                          <p style={{ margin: 0, fontSize: 18, fontWeight: "700", color: "#2ecc71" }}>
+                            ${Math.round(
+                              Object.entries(annualBudget).reduce((s, [cat, budget]) => {
+                                const spent = householdYear.by_category?.[cat] || 0;
+                                return s + Math.max((parseFloat(budget) || 0) - spent, 0);
+                              }, 0)
+                            ).toLocaleString()}
+                          </p>
+                        </div>
+                        <div>
+                          <p style={{ margin: 0, fontSize: 12, color: "#aaa" }}>Categories over budget</p>
+                          <p style={{ margin: 0, fontSize: 18, fontWeight: "700", color: "#e05c5c" }}>
+                            {Object.entries(annualBudget).filter(([cat, budget]) =>
+                              (householdYear.by_category?.[cat] || 0) > (parseFloat(budget) || 0)
+                            ).length}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
                   {/* Year transactions table */}
                   <div style={styles.card}>
                     <div style={styles.tableHeader}>
@@ -2022,13 +2263,17 @@ export default function App() {
               const INVESTMENT_TYPES = ["brokerage", "roth_ira", "traditional_ira", "401k", "roth_401k", "403b", "529"];
               const CASH_TYPES = ["checking", "savings", "money_market", "hsa"];
 
-              const currentInvested = latest.accounts
-                ?.filter(a => INVESTMENT_TYPES.includes(a.type))
-                .reduce((s, a) => s + Math.abs(a.balance), 0) || 0;
+              const currentInvested = netWorthHistory.reduce((total, entry) => {
+                return total + (entry.accounts || [])
+                  .filter(a => INVESTMENT_TYPES.includes(a.type))
+                  .reduce((s, a) => s + Math.abs(a.balance), 0);
+              }, 0);
 
-              const currentSavings = latest.accounts
-                ?.filter(a => CASH_TYPES.includes(a.type))
-                .reduce((s, a) => s + Math.abs(a.balance), 0) || 0;
+              const currentSavings = netWorthHistory.reduce((total, entry) => {
+                return total + (entry.accounts || [])
+                  .filter(a => CASH_TYPES.includes(a.type))
+                  .reduce((s, a) => s + Math.abs(a.balance), 0);
+              }, 0);
               const projections = [1, 3, 5, 10].map(years => {
                 // Investment accounts grow at 7% annually
                 const investmentGrowth = currentInvested * Math.pow(1 + annualReturn, years);
@@ -2052,10 +2297,16 @@ export default function App() {
 
               return (
                 <div style={styles.card}>
-                  <h2 style={styles.cardTitle}>Future Projections</h2>
+                  <div style={styles.tableHeader}>
+                    <h2 style={styles.cardTitle}>Future Projections</h2>
+                    <button onClick={fetchNetWorth} style={styles.clearFilter}>
+                      ↻ Refresh
+                    </button>
+                  </div>
                   <p style={{ color: "#888", fontSize: 13, marginBottom: 20 }}>
-                    Based on your current net worth and average monthly savings of ${Math.round(avgMonthlySavings).toLocaleString()}.
-                    Investments assume 7% annual return.
+                    Based on ${Math.round(currentInvested).toLocaleString()} currently invested
+                    + ${Math.round(currentSavings).toLocaleString()} in savings.
+                    Investments assume {coastInputs?.annualReturn || 7}% annual return.
                   </p>
 
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 24 }}>
@@ -2195,6 +2446,607 @@ export default function App() {
                   })}
                 </div>
               )}
+            </div>
+
+            {/* COAST FIRE Calculator */}
+            <div style={styles.card}>
+              <PageHeader eyebrow="Retirement Planning" title="COAST FIRE Calculator" />
+              <p style={{ color: "#888", fontSize: 13, marginBottom: 24 }}>
+                COAST FIRE means you've saved enough that your investments will grow on their own to fund retirement — no more contributions needed. Based on your real financial data.
+              </p>
+
+              {(() => {
+                // Pull real data from statements
+                // Group 2026 statements by month and combine both people
+                const statementsFrom2026 = statements.filter(s => s.month >= "2026-01");
+
+                const monthlyHouseholdTotals = {};
+                statementsFrom2026.forEach(s => {
+                  if (!monthlyHouseholdTotals[s.month]) {
+                    monthlyHouseholdTotals[s.month] = { income: 0, spending: 0, savings: 0, invested: 0 };
+                  }
+                  monthlyHouseholdTotals[s.month].income += s.totals?.income || 0;
+                  monthlyHouseholdTotals[s.month].spending += s.totals?.spending || 0;
+                  monthlyHouseholdTotals[s.month].savings += s.totals?.savings || 0;
+                  monthlyHouseholdTotals[s.month].invested += s.totals?.invested || 0;
+                });
+
+                const monthlyTotalsArray = Object.values(monthlyHouseholdTotals);
+                const numMonths = monthlyTotalsArray.length || 1;
+
+                const avgMonthlyIncome = monthlyTotalsArray.reduce((s, m) => s + m.income, 0) / numMonths;
+                const avgMonthlySpending = monthlyTotalsArray.reduce((s, m) => s + m.spending, 0) / numMonths;
+                const avgMonthlySavings = monthlyTotalsArray.reduce((s, m) => s + m.savings, 0) / numMonths;
+                const avgMonthlyInvested = monthlyTotalsArray.reduce((s, m) => s + m.invested, 0) / numMonths;
+
+                // Current invested from net worth
+                const INVESTMENT_TYPES = ["brokerage", "roth_ira", "traditional_ira", "401k", "roth_401k", "403b", "529"];
+                const currentInvested = netWorthHistory.reduce((total, entry) => {
+                  const invested = (entry.accounts || [])
+                    .filter(a => INVESTMENT_TYPES.includes(a.type))
+                    .reduce((s, a) => s + Math.abs(a.balance), 0);
+                  return total + invested;
+                }, 0);
+
+                // Total monthly investing (from statements + 401k manual input)
+                // Total monthly investing: statements invested + both 401k contributions
+                const totalMonthlyInvesting = avgMonthlyInvested + coastInputs.your401k + coastInputs.spouse401k + coastInputs.additionalMonthlySavings;
+
+                // COAST FIRE math
+                const annualReturn = coastInputs.annualReturn / 100;
+                const retirementExpenses = coastInputs.monthlyRetirementExpenses * 12;
+                const retirementNumber = retirementExpenses * 25;
+
+                // Use younger person's years to retirement for COAST calc
+                const youngerAge = Math.min(coastInputs.yourAge, coastInputs.spouseAge);
+                const yearsToRetirement = coastInputs.retirementAge - youngerAge;
+                const coastNumber = retirementNumber / Math.pow(1 + annualReturn, yearsToRetirement);
+
+                const progressToCoast = Math.min((currentInvested / coastNumber) * 100, 100);
+                const amountNeeded = Math.max(coastNumber - currentInvested, 0);
+                const alreadyCoasted = currentInvested >= coastNumber;
+
+                // How long to hit COAST at current rate
+                let monthsToCoast = 0;
+                if (!alreadyCoasted && totalMonthlyInvesting > 0) {
+                  let balance = currentInvested;
+                  while (balance < coastNumber && monthsToCoast < 600) {
+                    balance = balance * (1 + annualReturn / 12) + totalMonthlyInvesting;
+                    monthsToCoast++;
+                  }
+                }
+                const yearsToCoast = Math.floor(monthsToCoast / 12);
+                const remainingMonths = monthsToCoast % 12;
+                const coastAchievedAge = youngerAge + yearsToCoast;
+
+                // Savings needed to hit COAST in X years
+                const savingsNeededByYear = [2, 3, 5, 7].map(years => {
+                  const futureCoastNumber = coastNumber;
+                  const investmentGrowth = currentInvested * Math.pow(1 + annualReturn / 12, years * 12);
+                  const remaining = Math.max(futureCoastNumber - investmentGrowth, 0);
+                  const monthlyNeeded = remaining > 0
+                    ? remaining / (((Math.pow(1 + annualReturn / 12, years * 12) - 1) / (annualReturn / 12)))
+                    : 0;
+                  return { years, monthlyNeeded: Math.round(monthlyNeeded), yearlyNeeded: Math.round(monthlyNeeded * 12) };
+                });
+
+                // Projection chart data
+                const projectionData = Array.from({ length: yearsToRetirement + 1 }, (_, i) => {
+                  let balance = currentInvested;
+                  for (let m = 0; m < i * 12; m++) {
+                    balance = balance * (1 + annualReturn / 12) + (i * 12 <= monthsToCoast ? totalMonthlyInvesting : 0);
+                  }
+                  return {
+                    year: `Age ${youngerAge + i}`,
+                    invested: Math.round(balance),
+                    coastTarget: Math.round(coastNumber),
+                    retirementTarget: Math.round(retirementNumber),
+                  };
+                });
+
+                // Retirement bridge accounts
+                const LIQUID_TYPES = ["brokerage", "savings", "checking", "money_market"];
+                const liquidAssets = netWorthHistory.reduce((total, entry) => {
+                  return total + (entry.accounts || [])
+                    .filter(a => LIQUID_TYPES.includes(a.type))
+                    .reduce((s, a) => s + Math.abs(a.balance), 0);
+                }, 0);
+                const bridgeYears = Math.max(59.5 - coastInputs.retirementAge, 0);
+                const bridgeNeeded = coastInputs.monthlyRetirementExpenses * 12 * bridgeYears;
+
+                return (
+                  <>
+                    {/* Input controls */}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 28 }}>
+
+                      {/* Left column — ages and retirement */}
+                      <div style={{ background: "#f8f9fa", borderRadius: 16, padding: 20 }}>
+                        <p style={{ ...styles.insightLabel, marginBottom: 16 }}>Your Details</p>
+
+                        {[
+                          { label: "Your Age", key: "yourAge", min: 18, max: 70, unit: "yrs" },
+                          { label: "Spouse Age", key: "spouseAge", min: 18, max: 70, unit: "yrs" },
+                          { label: "Target Retirement Age", key: "retirementAge", min: 40, max: 75, unit: "yrs" },
+                          { label: "Monthly Retirement Expenses", key: "monthlyRetirementExpenses", min: 2000, max: 20000, step: 500, unit: "$", prefix: true },
+                        ].map(({ label, key, min, max, step = 1, unit, prefix }) => (
+                          <div key={key} style={{ marginBottom: 16 }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                              <label style={{ fontSize: 12, fontWeight: "600", color: "#555" }}>{label}</label>
+                              <span style={{ fontSize: 14, fontWeight: "700", color: "#1a1a2e" }}>
+                                {prefix ? `$${coastInputs[key].toLocaleString()}` : `${coastInputs[key]} ${unit}`}
+                              </span>
+                            </div>
+                            <input type="range" min={min} max={max} step={step}
+                              value={coastInputs[key]}
+                              onChange={(e) => setCoastInputs(prev => ({ ...prev, [key]: parseInt(e.target.value) }))}
+                              style={{ width: "100%", accentColor: "#4f86c6" }} />
+                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#aaa" }}>
+                              <span>{prefix ? `$${min.toLocaleString()}` : `${min} ${unit}`}</span>
+                              <span>{prefix ? `$${max.toLocaleString()}` : `${max} ${unit}`}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Right column — savings inputs */}
+                      <div style={{ background: "#f8f9fa", borderRadius: 16, padding: 20 }}>
+                        <p style={{ ...styles.insightLabel, marginBottom: 16 }}>Monthly Contributions</p>
+
+                        {/* Auto-filled from statements */}
+                        <div style={{ marginBottom: 16, padding: 12, background: "white", borderRadius: 10 }}>
+                          <p style={{ fontSize: 11, color: "#aaa", margin: "0 0 8px 0", textTransform: "uppercase", letterSpacing: "1px" }}>
+                            From your statements — combined household (auto)
+                          </p>
+                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                            <span style={{ fontSize: 13, color: "#555" }}>Avg monthly income</span>
+                            <span style={{ fontSize: 13, fontWeight: "700", color: "#4f86c6" }}>${Math.round(avgMonthlyIncome).toLocaleString()}</span>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                            <span style={{ fontSize: 13, color: "#555" }}>Avg monthly spending</span>
+                            <span style={{ fontSize: 13, fontWeight: "700", color: "#e05c5c" }}>${Math.round(avgMonthlySpending).toLocaleString()}</span>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                            <span style={{ fontSize: 13, color: "#555" }}>Avg monthly invested (statements)</span>
+                            <span style={{ fontSize: 13, fontWeight: "700", color: "#9b59b6" }}>${Math.round(avgMonthlyInvested).toLocaleString()}</span>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                            <span style={{ fontSize: 13, color: "#555" }}>Both 401k contributions</span>
+                            <span style={{ fontSize: 13, fontWeight: "700", color: "#9b59b6" }}>${(coastInputs.your401k + coastInputs.spouse401k).toLocaleString()}</span>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid #f0f0f0", paddingTop: 8, marginTop: 4 }}>
+                            <span style={{ fontSize: 13, color: "#555", fontWeight: "700" }}>Total monthly investing</span>
+                            <span style={{ fontSize: 13, fontWeight: "700", color: "#2ecc71" }}>${Math.round(totalMonthlyInvesting).toLocaleString()}</span>
+                          </div>
+                        </div>
+
+                        {/* Manual inputs */}
+                        {[
+                          { label: "Your Monthly 401k (Adheena)", key: "your401k", min: 0, max: 3000, step: 50, note: "Pre-tax, not in statements" },
+                          { label: "Spouse Monthly 401k (Malhar)", key: "spouse401k", min: 0, max: 3000, step: 50, note: "Pre-tax, not in statements" },
+                          { label: "Additional Monthly Investing", key: "additionalMonthlySavings", min: 0, max: 5000, step: 100, note: "What-if scenario" },
+                          { label: "Expected Annual Return", key: "annualReturn", min: 4, max: 12, step: 0.5, note: "7% is S&P 500 historical avg", suffix: "%" },
+                        ].map(({ label, key, min, max, step, note, suffix }) => (
+                          <div key={key} style={{ marginBottom: 16 }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                              <label style={{ fontSize: 12, fontWeight: "600", color: "#555" }}>{label}</label>
+                              <span style={{ fontSize: 14, fontWeight: "700", color: "#1a1a2e" }}>
+                                {suffix ? `${coastInputs[key]}${suffix}` : `$${coastInputs[key].toLocaleString()}`}
+                              </span>
+                            </div>
+                            <input type="range" min={min} max={max} step={step}
+                              value={coastInputs[key]}
+                              onChange={(e) => setCoastInputs(prev => ({ ...prev, [key]: parseFloat(e.target.value) }))}
+                              style={{ width: "100%", accentColor: "#4f86c6" }} />
+                            <p style={{ fontSize: 11, color: "#aaa", margin: "2px 0 0 0" }}>{note}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* COAST FIRE Status */}
+                    <div style={{
+                      background: alreadyCoasted
+                        ? "linear-gradient(135deg, #1a3a1a 0%, #2ecc71 100%)"
+                        : "linear-gradient(135deg, #1a1a2e 0%, #4f86c6 100%)",
+                      borderRadius: 20,
+                      padding: 28,
+                      color: "white",
+                      marginBottom: 24,
+                      textAlign: "center"
+                    }}>
+                      {alreadyCoasted ? (
+                        <>
+                          <p style={{ fontSize: 14, opacity: 0.8, margin: "0 0 8px 0", textTransform: "uppercase", letterSpacing: "1px" }}>
+                            🎉 Congratulations!
+                          </p>
+                          <p style={{ fontSize: 32, fontWeight: "800", margin: "0 0 8px 0" }}>
+                            You've Hit COAST FIRE!
+                          </p>
+                          <p style={{ fontSize: 15, opacity: 0.9, margin: 0 }}>
+                            Your ${Math.round(currentInvested).toLocaleString()} invested will grow to ${Math.round(retirementNumber).toLocaleString()} by age {coastInputs.retirementAge} at {coastInputs.annualReturn}% annual return — with zero additional contributions.
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p style={{ fontSize: 14, opacity: 0.8, margin: "0 0 8px 0", textTransform: "uppercase", letterSpacing: "1px" }}>
+                            COAST FIRE Target
+                          </p>
+                          <p style={{ fontSize: 42, fontWeight: "800", margin: "0 0 4px 0" }}>
+                            ${Math.round(coastNumber).toLocaleString()}
+                          </p>
+                          <p style={{ fontSize: 15, opacity: 0.9, margin: "0 0 16px 0" }}>
+                            Combined household investing ${Math.round(currentInvested).toLocaleString()} ·
+                            ${Math.round(amountNeeded).toLocaleString()} away ·
+                            At current rate: {yearsToCoast > 0 ? `${yearsToCoast}y ` : ""}{remainingMonths}m ·
+                            You'll both be {coastAchievedAge}/{coastAchievedAge + (coastInputs.spouseAge - coastInputs.yourAge)} years old
+                          </p>
+                          <div style={{ background: "rgba(255,255,255,0.2)", borderRadius: 50, height: 12, marginBottom: 8 }}>
+                            <div style={{
+                              background: "white",
+                              borderRadius: 50,
+                              height: 12,
+                              width: `${progressToCoast}%`,
+                              transition: "width 0.5s"
+                            }} />
+                          </div>
+                          <p style={{ fontSize: 13, opacity: 0.8, margin: 0 }}>
+                            {Math.round(progressToCoast)}% of the way there · Currently invested: ${Math.round(currentInvested).toLocaleString()}
+                          </p>
+                        </>
+                      )}
+                    </div>
+
+                    {/* Key numbers */}
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 24 }}>
+                      {[
+                        { label: "Retirement Number", value: `$${Math.round(retirementNumber).toLocaleString()}`, sub: "Total needed at retirement", color: "#1a1a2e" },
+                        { label: "COAST Number", value: `$${Math.round(coastNumber).toLocaleString()}`, sub: "Needed now to coast", color: "#4f86c6" },
+                        { label: "Total Monthly Investing", value: `$${Math.round(totalMonthlyInvesting).toLocaleString()}`, sub: `Statements $${Math.round(avgMonthlyInvested).toLocaleString()} + 401ks $${coastInputs.your401k + coastInputs.spouse401k}`, color: "#9b59b6" },
+                        { label: "Full FIRE Number", value: `$${Math.round(retirementNumber).toLocaleString()}`, sub: `4% rule on $${(coastInputs.monthlyRetirementExpenses * 12).toLocaleString()}/yr`, color: "#2ecc71" },
+                      ].map(({ label, value, sub, color }) => (
+                        <div key={label} style={styles.totalCard}>
+                          <p style={styles.totalLabel}>{label}</p>
+                          <p style={{ ...styles.totalAmount, color, fontSize: 20 }}>{value}</p>
+                          <p style={{ fontSize: 11, color: "#aaa", margin: 0 }}>{sub}</p>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Projection chart */}
+                    <h3 style={styles.chartSubtitle}>Investment Growth Projection</h3>
+                    <p style={{ fontSize: 12, color: "#aaa", marginBottom: 16 }}>
+                      Solid line = your projected investments. Dashed lines = COAST target and full retirement target.
+                    </p>
+                    <ResponsiveContainer width="100%" height={320}>
+                      <LineChart data={projectionData}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="year" tick={{ fontSize: 11 }} interval={Math.floor(yearsToRetirement / 8)} />
+                        <YAxis tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} tick={{ fontSize: 11 }} />
+                        <Tooltip formatter={(value) => `$${Math.round(value).toLocaleString()}`} />
+                        <Legend />
+                        <Line type="monotone" dataKey="invested" name="Projected Investments"
+                          stroke="#4f86c6" strokeWidth={3} dot={false} />
+                        <Line type="monotone" dataKey="coastTarget" name="COAST Target"
+                          stroke="#f0a500" strokeWidth={2} strokeDasharray="8 4" dot={false} />
+                        <Line type="monotone" dataKey="retirementTarget" name="Full Retirement Target"
+                          stroke="#2ecc71" strokeWidth={2} strokeDasharray="4 4" dot={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+
+                    {/* Savings needed table */}
+                    <h3 style={styles.chartSubtitle}>How Much To Save To Hit COAST</h3>
+                    <p style={{ fontSize: 12, color: "#aaa", marginBottom: 16 }}>
+                      Monthly investment needed (on top of investment growth on existing ${Math.round(currentInvested).toLocaleString()}) to hit your COAST number.
+                    </p>
+                    <table style={styles.table}>
+                      <thead>
+                        <tr>
+                          <th style={styles.th}>Timeline</th>
+                          <th style={styles.th}>Monthly Needed</th>
+                          <th style={styles.th}>Yearly Needed</th>
+                          <th style={styles.th}>vs Current Rate</th>
+                          <th style={styles.th}>Your Age Then</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {savingsNeededByYear.map(({ years, monthlyNeeded, yearlyNeeded }, i) => {
+                          const diff = monthlyNeeded - totalMonthlyInvesting;
+                          return (
+                            <tr key={years} style={i % 2 === 0 ? styles.rowEven : styles.rowOdd}>
+                              <td style={{ ...styles.td, fontWeight: "700" }}>In {years} years</td>
+                              <td style={{ ...styles.td, fontWeight: "700", color: diff <= 0 ? "#2ecc71" : "#e05c5c" }}>
+                                ${monthlyNeeded.toLocaleString()}
+                              </td>
+                              <td style={{ ...styles.td, color: "#555" }}>${yearlyNeeded.toLocaleString()}</td>
+                              <td style={{ ...styles.td }}>
+                                <span style={{
+                                  fontSize: 12, padding: "2px 8px", borderRadius: 50, fontWeight: "600",
+                                  background: diff <= 0 ? "#e8f8ee" : "#ffeaea",
+                                  color: diff <= 0 ? "#2ecc71" : "#e05c5c"
+                                }}>
+                                  {diff <= 0 ? `✓ Already saving enough` : `+$${diff.toLocaleString()}/mo more`}
+                                </span>
+                              </td>
+                              <td style={{ ...styles.td, color: "#888" }}>{youngerAge + years}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+
+                    {/* Retirement bridge */}
+                    {coastInputs.retirementAge < 59.5 && (
+                      <div style={{ ...styles.insightBox, marginTop: 24, background: "#fff8e1", border: "1px solid #f0a500" }}>
+                        <p style={{ ...styles.insightLabel, color: "#f0a500" }}>⚠️ Retirement Bridge Needed</p>
+                        <p style={{ fontSize: 14, margin: "0 0 8px 0" }}>
+                          You want to retire at {coastInputs.retirementAge} but 401k/IRA funds aren't penalty-free until 59½.
+                          You'll need <strong>${Math.round(bridgeNeeded).toLocaleString()}</strong> in liquid assets
+                          (brokerage, savings) to cover {Math.round(bridgeYears * 10) / 10} years of expenses before accessing retirement accounts.
+                        </p>
+                        <p style={{ fontSize: 14, margin: 0, color: "#888" }}>
+                          You currently have <strong style={{ color: liquidAssets >= bridgeNeeded ? "#2ecc71" : "#e05c5c" }}>
+                            ${Math.round(liquidAssets).toLocaleString()}
+                          </strong> in liquid accounts.
+                          {liquidAssets >= bridgeNeeded
+                            ? " ✓ You're covered."
+                            : ` You need $${Math.round(bridgeNeeded - liquidAssets).toLocaleString()} more in liquid assets.`}
+                        </p>
+                      </div>
+                    )}
+                    {/* Retirement Bridge Calculator */}
+                    {coastInputs.retirementAge < 59.5 && (
+                      <div style={{ marginTop: 24 }}>
+                        <h3 style={styles.chartSubtitle}>Retirement Bridge Calculator</h3>
+                        <p style={{ fontSize: 12, color: "#aaa", marginBottom: 20 }}>
+                          You want to retire at {coastInputs.retirementAge} but tax-advantaged accounts aren't penalty-free until 59½.
+                          Here's how to bridge the {Math.round((59.5 - coastInputs.retirementAge) * 10) / 10} year gap.
+                        </p>
+
+                        {(() => {
+                          const bridgeYears = 59.5 - coastInputs.retirementAge;
+                          const yearsUntilRetirement = coastInputs.retirementAge - youngerAge;
+                          const monthlyExpenses = coastInputs.monthlyRetirementExpenses;
+                          const annualExpenses = monthlyExpenses * 12;
+                          const bridgeReturn = 0.05; // conservative 5% on liquid accounts
+
+                          // Project liquid accounts at retirement age
+                          const LIQUID_TYPES = ["brokerage", "savings", "checking", "money_market"];
+                          const currentLiquid = netWorthHistory.reduce((total, entry) => {
+                            return total + (entry.accounts || [])
+                              .filter(a => LIQUID_TYPES.includes(a.type))
+                              .reduce((s, a) => s + Math.abs(a.balance), 0);
+                          }, 0);
+
+                          // Monthly liquid investing from statements (brokerage contributions)
+                          // Use avgMonthlyInvested from statements as proxy for brokerage contributions
+                          const monthlyBrokerageContribution = avgMonthlyInvested;
+
+                          // Project liquid at retirement
+                          const projectedLiquidAtRetirement = currentLiquid * Math.pow(1 + bridgeReturn, yearsUntilRetirement) +
+                            monthlyBrokerageContribution * ((Math.pow(1 + bridgeReturn / 12, yearsUntilRetirement * 12) - 1) / (bridgeReturn / 12));
+
+                          // Roth contribution ladder
+                          // Assume $7000/year each = $14000/year household Roth contributions
+                          const annualRothContributions = 14000;
+                          const totalRothContributions = annualRothContributions * yearsUntilRetirement;
+
+                          // Bridge needed with 5% growth (present value of annuity)
+                          const bridgeNeededPV = annualExpenses * ((1 - Math.pow(1 + bridgeReturn, -bridgeYears)) / bridgeReturn);
+
+                          // Total bridge resources
+                          const totalBridgeResources = projectedLiquidAtRetirement + totalRothContributions;
+                          const bridgeGap = Math.max(bridgeNeededPV - totalBridgeResources, 0);
+                          const bridgeCovered = totalBridgeResources >= bridgeNeededPV;
+                          const coveragePercent = Math.min((totalBridgeResources / bridgeNeededPV) * 100, 100);
+
+                          // How much extra monthly to close gap
+                          const extraMonthlyNeeded = bridgeGap > 0
+                            ? bridgeGap / ((Math.pow(1 + bridgeReturn / 12, yearsUntilRetirement * 12) - 1) / (bridgeReturn / 12))
+                            : 0;
+
+                          // Bridge by retirement age scenarios
+                          const retirementAgeScenarios = [45, 48, 50, 52, 55].map(age => {
+                            if (age <= youngerAge) return null;
+                            const yrs = age - youngerAge;
+                            const bridgeYrs = 59.5 - age;
+                            if (bridgeYrs <= 0) return { age, status: "No bridge needed", covered: true, gap: 0 };
+
+                            const liquid = currentLiquid * Math.pow(1 + bridgeReturn, yrs) +
+                              monthlyBrokerageContribution * ((Math.pow(1 + bridgeReturn / 12, yrs * 12) - 1) / (bridgeReturn / 12));
+                            const roth = annualRothContributions * yrs;
+                            const needed = annualExpenses * ((1 - Math.pow(1 + bridgeReturn, -bridgeYrs)) / bridgeReturn);
+                            const resources = liquid + roth;
+                            const gap = Math.max(needed - resources, 0);
+                            return {
+                              age,
+                              projectedLiquid: Math.round(liquid),
+                              rothContributions: Math.round(roth),
+                              totalResources: Math.round(resources),
+                              needed: Math.round(needed),
+                              gap: Math.round(gap),
+                              covered: resources >= needed,
+                              coveragePct: Math.min(Math.round((resources / needed) * 100), 100)
+                            };
+                          }).filter(Boolean);
+
+                          // Bridge chart data
+                          const bridgeChartData = Array.from({ length: Math.ceil(bridgeYears) + 1 }, (_, i) => {
+                            const remaining = projectedLiquidAtRetirement + totalRothContributions - (annualExpenses * i);
+                            return {
+                              year: `Age ${coastInputs.retirementAge + i}`,
+                              balance: Math.max(Math.round(remaining * Math.pow(1 + bridgeReturn, i) - annualExpenses * i), 0),
+                              expenses: annualExpenses,
+                            };
+                          });
+
+                          return (
+                            <>
+                              {/* Bridge status card */}
+                              <div style={{
+                                background: bridgeCovered
+                                  ? "linear-gradient(135deg, #1a3a1a 0%, #2ecc71 100%)"
+                                  : "linear-gradient(135deg, #3a1a1a 0%, #e05c5c 100%)",
+                                borderRadius: 20,
+                                padding: 24,
+                                color: "white",
+                                marginBottom: 24,
+                                textAlign: "center"
+                              }}>
+                                <p style={{ fontSize: 13, opacity: 0.8, margin: "0 0 8px 0", textTransform: "uppercase", letterSpacing: "1px" }}>
+                                  {bridgeCovered ? "✅ Bridge Covered" : "⚠️ Bridge Gap"}
+                                </p>
+                                <p style={{ fontSize: 28, fontWeight: "800", margin: "0 0 8px 0" }}>
+                                  {bridgeCovered
+                                    ? `You're covered for all ${Math.round(bridgeYears * 10) / 10} years`
+                                    : `$${Math.round(bridgeGap).toLocaleString()} gap to fill`}
+                                </p>
+                                <div style={{ background: "rgba(255,255,255,0.2)", borderRadius: 50, height: 10, margin: "12px 0 8px 0" }}>
+                                  <div style={{
+                                    background: "white", borderRadius: 50, height: 10,
+                                    width: `${coveragePercent}%`, transition: "width 0.5s"
+                                  }} />
+                                </div>
+                                <p style={{ fontSize: 13, opacity: 0.8, margin: 0 }}>
+                                  {Math.round(coveragePercent)}% of bridge covered
+                                </p>
+                              </div>
+
+                              {/* Bridge breakdown */}
+                              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 24 }}>
+                                {[
+                                  { label: "Bridge Period", value: `${Math.round(bridgeYears * 10) / 10} years`, sub: `Age ${coastInputs.retirementAge} to 59½`, color: "#f0a500" },
+                                  { label: "Total Bridge Needed", value: `$${Math.round(bridgeNeededPV).toLocaleString()}`, sub: `$${monthlyExpenses.toLocaleString()}/mo for ${Math.round(bridgeYears)} years`, color: "#e05c5c" },
+                                  { label: "Projected Liquid at Retirement", value: `$${Math.round(projectedLiquidAtRetirement).toLocaleString()}`, sub: `Brokerage + savings at age ${coastInputs.retirementAge}`, color: "#4f86c6" },
+                                ].map(({ label, value, sub, color }) => (
+                                  <div key={label} style={styles.totalCard}>
+                                    <p style={styles.totalLabel}>{label}</p>
+                                    <p style={{ ...styles.totalAmount, color, fontSize: 20 }}>{value}</p>
+                                    <p style={{ fontSize: 11, color: "#aaa", margin: 0 }}>{sub}</p>
+                                  </div>
+                                ))}
+                              </div>
+
+                              {/* Bridge resources breakdown */}
+                              <div style={{ ...styles.insightBox, marginBottom: 24 }}>
+                                <p style={styles.insightLabel}>Your Bridge Resources at Age {coastInputs.retirementAge}</p>
+                                <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid #f0f0f0" }}>
+                                  <div>
+                                    <p style={{ margin: 0, fontWeight: "600", fontSize: 14 }}>Projected Brokerage + Savings</p>
+                                    <p style={{ margin: 0, fontSize: 12, color: "#aaa" }}>Current ${Math.round(currentLiquid).toLocaleString()} growing at 5% + ${Math.round(monthlyBrokerageContribution).toLocaleString()}/mo contributions</p>
+                                  </div>
+                                  <p style={{ margin: 0, fontWeight: "700", fontSize: 16, color: "#4f86c6" }}>${Math.round(projectedLiquidAtRetirement).toLocaleString()}</p>
+                                </div>
+                                <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid #f0f0f0" }}>
+                                  <div>
+                                    <p style={{ margin: 0, fontWeight: "600", fontSize: 14 }}>Roth IRA Contribution Ladder</p>
+                                    <p style={{ margin: 0, fontSize: 12, color: "#aaa" }}>$14,000/year × {yearsUntilRetirement} years — contributions only, withdrawable anytime</p>
+                                  </div>
+                                  <p style={{ margin: 0, fontWeight: "700", fontSize: 16, color: "#9b59b6" }}>${Math.round(totalRothContributions).toLocaleString()}</p>
+                                </div>
+                                <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 0" }}>
+                                  <p style={{ margin: 0, fontWeight: "700", fontSize: 14 }}>Total Bridge Resources</p>
+                                  <p style={{ margin: 0, fontWeight: "700", fontSize: 16, color: bridgeCovered ? "#2ecc71" : "#e05c5c" }}>${Math.round(totalBridgeResources).toLocaleString()}</p>
+                                </div>
+
+                                {!bridgeCovered && (
+                                  <div style={{ background: "#ffeaea", borderRadius: 8, padding: 12, marginTop: 8 }}>
+                                    <p style={{ margin: "0 0 4px 0", fontWeight: "700", fontSize: 13, color: "#e05c5c" }}>To close the gap:</p>
+                                    <p style={{ margin: 0, fontSize: 13 }}>
+                                      Invest an extra <strong>${Math.round(extraMonthlyNeeded).toLocaleString()}/month</strong> in your brokerage accounts,
+                                      or consider retiring at a later age (see table below).
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Retirement age scenarios table */}
+                              <h3 style={styles.chartSubtitle}>Bridge Coverage by Retirement Age</h3>
+                              <p style={{ fontSize: 12, color: "#aaa", marginBottom: 16 }}>
+                                How your bridge coverage changes depending on when you retire.
+                              </p>
+                              <table style={styles.table}>
+                                <thead>
+                                  <tr>
+                                    <th style={styles.th}>Retire At</th>
+                                    <th style={styles.th}>Bridge Period</th>
+                                    <th style={styles.th}>Liquid at Retirement</th>
+                                    <th style={styles.th}>Roth Ladder</th>
+                                    <th style={styles.th}>Total Resources</th>
+                                    <th style={styles.th}>Bridge Needed</th>
+                                    <th style={styles.th}>Status</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {retirementAgeScenarios.map((s, i) => (
+                                    <tr key={s.age} style={{
+                                      ...(i % 2 === 0 ? styles.rowEven : styles.rowOdd),
+                                      fontWeight: s.age === coastInputs.retirementAge ? "700" : "400",
+                                      background: s.age === coastInputs.retirementAge ? "#f0f6ff" : undefined
+                                    }}>
+                                      <td style={styles.td}>
+                                        Age {s.age}
+                                        {s.age === coastInputs.retirementAge && (
+                                          <span style={{ fontSize: 10, color: "#4f86c6", marginLeft: 4 }}>← current</span>
+                                        )}
+                                      </td>
+                                      <td style={styles.td}>{s.status === "No bridge needed" ? "—" : `${Math.round((59.5 - s.age) * 10) / 10} yrs`}</td>
+                                      <td style={styles.td}>${(s.projectedLiquid || 0).toLocaleString()}</td>
+                                      <td style={styles.td}>${(s.rothContributions || 0).toLocaleString()}</td>
+                                      <td style={{ ...styles.td, fontWeight: "700", color: "#4f86c6" }}>${(s.totalResources || 0).toLocaleString()}</td>
+                                      <td style={styles.td}>{s.needed ? `$${s.needed.toLocaleString()}` : "—"}</td>
+                                      <td style={styles.td}>
+                                        {s.covered ? (
+                                          <span style={{ fontSize: 12, padding: "2px 8px", borderRadius: 50, background: "#e8f8ee", color: "#2ecc71", fontWeight: "700" }}>
+                                            ✓ Covered
+                                          </span>
+                                        ) : (
+                                          <span style={{ fontSize: 12, padding: "2px 8px", borderRadius: 50, background: "#ffeaea", color: "#e05c5c", fontWeight: "700" }}>
+                                            ${s.gap.toLocaleString()} gap
+                                          </span>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+
+                              {/* Strategy tips */}
+                              <div style={{ marginTop: 24, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
+                                {[
+                                  {
+                                    title: "Roth Contribution Ladder",
+                                    desc: "Max both Roth IRAs every year ($14k/year combined). Contributions — not earnings — can be withdrawn anytime penalty free. This is your most flexible bridge resource.",
+                                    color: "#9b59b6",
+                                    icon: "🏦"
+                                  },
+                                  {
+                                    title: "Taxable Brokerage",
+                                    desc: "Keep investing in Vanguard and Robinhood. No withdrawal restrictions. Long term capital gains tax rate applies (0-20%) which is lower than income tax.",
+                                    color: "#4f86c6",
+                                    icon: "📈"
+                                  },
+                                  {
+                                    title: "Rule 72t (SEPP)",
+                                    desc: "If needed, you can access your 401k before 59½ using Substantially Equal Periodic Payments. Requires a fixed 5-year commitment. Good last resort option.",
+                                    color: "#f0a500",
+                                    icon: "⚖️"
+                                  }
+                                ].map(({ title, desc, color, icon }) => (
+                                  <div key={title} style={{ ...styles.insightBox, borderLeft: `3px solid ${color}` }}>
+                                    <p style={{ fontSize: 18, margin: "0 0 8px 0" }}>{icon}</p>
+                                    <p style={{ fontWeight: "700", fontSize: 13, color, margin: "0 0 6px 0" }}>{title}</p>
+                                    <p style={{ fontSize: 12, color: "#666", margin: 0, lineHeight: 1.5 }}>{desc}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
             {/* AI Planning Insights */}

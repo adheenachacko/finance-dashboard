@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 from models import Statement, Person, User, create_tables, get_db
 from auth import hash_password, verify_password, create_access_token, get_current_user
-from models import Statement, Person, User, ChatMessage, HouseholdInsight, NetWorthEntry, SavingsGoal, create_tables, get_db
+from models import Statement, Person, User, ChatMessage, HouseholdInsight, NetWorthEntry, SavingsGoal, AnnualBudget, create_tables, get_db
 import io
 import json
 import os
@@ -1559,6 +1559,143 @@ Financial data:
     raw = raw.strip()
     insights = json.loads(raw)
     return {"insights": insights}
+
+# ── Annual Budgets ─────────────────────────────────────
+
+@app.get("/budgets/{year}")
+async def get_budget(
+    year: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    budget = db.query(AnnualBudget).filter(
+        AnnualBudget.user_id == current_user.id,
+        AnnualBudget.year == year
+    ).first()
+    if not budget:
+        return {"year": year, "budgets": {}}
+    return {"year": year, "budgets": budget.budgets}
+
+
+@app.post("/budgets/{year}")
+async def save_budget(
+    year: str,
+    budgets: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    budgets_data = json.loads(budgets)
+
+    existing = db.query(AnnualBudget).filter(
+        AnnualBudget.user_id == current_user.id,
+        AnnualBudget.year == year
+    ).first()
+
+    if existing:
+        existing.budgets = budgets_data
+        existing.updated_at = datetime.utcnow()
+        flag_modified(existing, "budgets")
+        db.commit()
+        db.refresh(existing)
+    else:
+        budget = AnnualBudget(
+            user_id=current_user.id,
+            year=year,
+            budgets=budgets_data
+        )
+        db.add(budget)
+        db.commit()
+        db.refresh(budget)
+
+    return {"year": year, "budgets": budgets_data}
+
+
+@app.post("/budgets/{year}/recommend")
+async def recommend_budgets(
+    year: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Get household spending data for the year
+    people = db.query(Person).filter(Person.user_id == current_user.id).all()
+
+    actual_spending = {}
+    total_income = 0
+    months_tracked = 0
+
+    for person in people:
+        statements = db.query(Statement).filter(
+            Statement.person_id == person.id,
+            Statement.month.like(f"{year}-%")
+        ).all()
+        months_tracked = max(months_tracked, len(statements))
+        for s in statements:
+            total_income += s.totals.get("income", 0)
+            for cat, amt in s.totals.get("categories", {}).items():
+                actual_spending[cat] = actual_spending.get(cat, 0) + amt
+
+    # Get savings goals for context
+    goals = db.query(SavingsGoal).filter(
+        SavingsGoal.user_id == current_user.id
+    ).all()
+
+    # Get net worth for context
+    net_worth = db.query(NetWorthEntry).filter(
+        NetWorthEntry.user_id == current_user.id
+    ).all()
+    total_invested = sum(
+        a["balance"] for e in net_worth
+        for a in (e.accounts or [])
+        if a.get("type") in ["brokerage", "roth_ira", "401k", "roth_401k", "traditional_ira", "403b"]
+        and a["balance"] > 0
+    )
+
+    context = {
+        "year": year,
+        "months_tracked": months_tracked,
+        "annual_income": round(total_income, 2),
+        "actual_spending_ytd": {k: round(v, 2) for k, v in actual_spending.items()},
+        "total_invested": round(total_invested, 2),
+        "savings_goals": [{"name": g.name, "target": g.target_amount} for g in goals],
+        "available_categories": ["Food", "Groceries", "Transport", "Shopping", "Subscriptions",
+                                  "Utilities", "Healthcare", "Entertainment", "Housing",
+                                  "Travel", "Fitness", "Other"]
+    }
+
+    message = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=1000,
+        messages=[{
+            "role": "user",
+            "content": f"""You are a financial advisor. Based on this couple's actual spending and financial situation, recommend reasonable ANNUAL budget limits for each spending category.
+
+Return a JSON object with category names as keys and annual budget amounts as values. Nothing else.
+
+Example format:
+{{"Food": 8000, "Groceries": 6000, "Travel": 12000}}
+
+Rules:
+- Base recommendations on their actual YTD spending patterns, annualized
+- Be realistic — don't suggest cutting spending by more than 20% unless a category is clearly excessive
+- For Travel, be generous since trips are planned in advance and paid upfront
+- Consider their savings goals when recommending — they should still be able to save aggressively
+- Only include categories that appear in their spending or are commonly used
+- Round to nearest $500
+
+Financial context:
+{json.dumps(context, indent=2)}"""
+        }]
+    )
+
+    raw = message.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.strip()
+    recommended = json.loads(raw)
+
+    return {"recommended": recommended}
 
 @app.get("/health")
 async def health():

@@ -95,6 +95,16 @@ class SavingsGoal(Base):
     target_date = Column(String, nullable=True)  # YYYY-MM format
     color = Column(String, default="#4f86c6")
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class AnnualBudget(Base):
+    __tablename__ = "annual_budgets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    year = Column(String, nullable=False)
+    budgets = Column(JSON, nullable=True)  # {category: amount}
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
     
 def create_tables():
     Base.metadata.create_all(bind=engine)
